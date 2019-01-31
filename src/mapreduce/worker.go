@@ -14,7 +14,7 @@ type Worker struct {
 	sync.Mutex
 
 	name   string
-	Map    func(string, string) []KeyValue	
+	Map    func(string, string) []KeyValue
 	Reduce func(string, []string) string
 	nRPC   int // protected by mutex
 	nTasks int // protected by mutex
@@ -23,7 +23,8 @@ type Worker struct {
 
 // DoTask is called by the master when a new task is being scheduled on this worker.
 func (wk *Worker) DoTask(arg *DoTaskArgs, _ *struct{}) error {
-	fmt.Printf("%s: given %v task #%d on file %s (nios: %d)\n",
+
+	debug("%s: given %v task #%d on file %s (nios: %d)\n",
 		wk.name, arg.Phase, arg.TaskNumber, arg.File, arg.NumOtherPhase)
 
 	switch arg.Phase {
@@ -33,7 +34,7 @@ func (wk *Worker) DoTask(arg *DoTaskArgs, _ *struct{}) error {
 		doReduce(arg.JobName, arg.TaskNumber, arg.NumOtherPhase, wk.Reduce)
 	}
 
-	fmt.Printf("%s: %v task #%d done\n", wk.name, arg.Phase, arg.TaskNumber)
+	debug("%s: %v task #%d done\n", wk.name, arg.Phase, arg.TaskNumber)
 	return nil
 }
 
@@ -54,15 +55,16 @@ func (wk *Worker) register(master string) {
 	args := new(RegisterArgs)
 	args.Worker = wk.name
 	ok := call(master, "Master.Register", args, new(struct{}))
-	if ok == false {
+	if !ok {
 		fmt.Printf("Register: RPC %s register error\n", master)
 	}
 }
 
 // RunWorker sets up a connection with the master, registers its address, and
 // waits for tasks to be scheduled.
-func RunWorker(MasterAddress string, me string, MapFunc func(string, string) []KeyValue,
-	ReduceFunc func(string, []string) string, nRPC int) {
+func RunWorker(MasterAddress string, me string,
+	MapFunc func(string, string) []KeyValue, ReduceFunc func(string, []string) string, nRPC int) {
+
 	debug("RunWorker %s\n", me)
 	wk := new(Worker)
 	wk.name = me
@@ -77,6 +79,7 @@ func RunWorker(MasterAddress string, me string, MapFunc func(string, string) []K
 		log.Fatal("RunWorker: worker ", me, " error: ", e)
 	}
 	wk.l = l
+	// register worker to master
 	wk.register(MasterAddress)
 
 	// DON'T MODIFY CODE BELOW

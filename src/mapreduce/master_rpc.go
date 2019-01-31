@@ -1,7 +1,6 @@
 package mapreduce
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/rpc"
@@ -59,8 +58,8 @@ func (mr *Master) startRPCServer() {
 func (mr *Master) stopRPCServer() {
 	var reply ShutdownReply
 	ok := call(mr.address, "Master.Shutdown", new(struct{}), &reply)
-	if ok == false {
-		fmt.Printf("Cleanup: RPC %s error\n", mr.address)
+	if !ok {
+		debug("Cleanup: RPC %s error\n", mr.address)
 	}
 	debug("cleanupRegistration: done\n")
 }

@@ -33,7 +33,6 @@
 //   6. The master sends a Shutdown RPC to each of its workers, and then shuts
 //      down its own RPC server.
 //
-// TODO:
 // You will have to write/modify doMap, doReduce, and schedule yourself. These
 // are located in common_map.go, common_reduce.go, and schedule.go
 // respectively. You will also have to write the map and reduce functions in

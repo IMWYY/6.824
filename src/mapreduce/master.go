@@ -15,7 +15,7 @@ type Master struct {
 	address         string
 	registerChannel chan string
 	doneChannel     chan bool
-	workers         []string        // protected by the mutex
+	workers         []string // protected by the mutex
 
 	// Per-task information
 	jobName string   // Name of currently executing job
@@ -50,14 +50,11 @@ func newMaster(master string) (mr *Master) {
 	return
 }
 
-// Sequential runs map and reduce tasks sequentially, waiting for each task to
-// complete before scheduling the next.
+// Sequential runs map and reduce tasks sequentially, waiting for each task to complete before scheduling the next.
 func Sequential(jobName string, files []string, nreduce int,
-	mapF func(string, string) []KeyValue,
-	reduceF func(string, []string) string,
-) (mr *Master) {
+	mapF func(string, string) []KeyValue, reduceF func(string, []string) string) (mr *Master) {
 	mr = newMaster("master")
-	go mr.run(jobName, files, nreduce, func(phase jobPhase) {
+	seqSchedule := func(phase jobPhase) {
 		switch phase {
 		case mapPhase:
 			for i, f := range mr.files {
@@ -68,7 +65,8 @@ func Sequential(jobName string, files []string, nreduce int,
 				doReduce(mr.jobName, i, len(mr.files), reduceF)
 			}
 		}
-	}, func() {
+	}
+	go mr.run(jobName, files, nreduce, seqSchedule, func() {
 		mr.stats = []int{len(files) + nreduce}
 	})
 	return
@@ -96,15 +94,12 @@ func Distributed(jobName string, files []string, nreduce int, master string) (mr
 // statistics are collected, and the master is shut down.
 //
 // Note that this implementation assumes a shared file system.
-func (mr *Master) run(jobName string, files []string, nreduce int,
-	schedule func(phase jobPhase),
-	finish func(),
-) {
+func (mr *Master) run(jobName string, files []string, nreduce int, schedule func(phase jobPhase), finish func()) {
 	mr.jobName = jobName
 	mr.files = files
 	mr.nReduce = nreduce
 
-	fmt.Printf("%s: Starting Map/Reduce task %s\n", mr.address, mr.jobName)
+	debug("%s: Starting Map/Reduce task %s\n", mr.address, mr.jobName)
 
 	schedule(mapPhase)
 	schedule(reducePhase)
@@ -112,7 +107,7 @@ func (mr *Master) run(jobName string, files []string, nreduce int,
 
 	mr.merge()
 
-	fmt.Printf("%s: Map/Reduce task completed\n", mr.address)
+	debug("%s: Map/Reduce task completed\n", mr.address)
 
 	mr.doneChannel <- true
 }

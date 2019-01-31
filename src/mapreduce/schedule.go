@@ -23,7 +23,7 @@ func (mr *Master) schedule(phase jobPhase) {
 	// them have been completed successfully should the function return.
 	// Remember that workers may fail, and that any given worker may finish
 	// multiple tasks.
-	//
+
 	wg := sync.WaitGroup{}
 	wg.Add(ntasks)
 	for i := 0; i < ntasks; i++ {

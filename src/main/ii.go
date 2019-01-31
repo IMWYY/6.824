@@ -35,9 +35,8 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 // should be a single output value for that key.
 func reduceF(key string, values []string) string {
 	sort.Strings(values)
-	var res string
-	res = strconv.Itoa(len(values)) + " "
-	for _,s := range values {
+	res := strconv.Itoa(len(values)) + " "
+	for _, s := range values {
 		res = res + s + ","
 	}
 	return res[:len(res)-1]

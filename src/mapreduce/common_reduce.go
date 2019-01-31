@@ -10,9 +10,9 @@ import (
 // intermediate key/value pairs by key, calls the user-defined reduce function
 // (reduceF) for each key, and writes the output to disk.
 func doReduce(
-	jobName string, // the name of the whole MapReduce job
+	jobName string,       // the name of the whole MapReduce job
 	reduceTaskNumber int, // which reduce task this is
-	nMap int, // the number of map tasks that were run ("M" in the paper)
+	nMap int,             // the number of map tasks that were run ("M" in the paper)
 	reduceF func(key string, values []string) string,
 ) {
 	// You will need to write this function.
@@ -37,14 +37,14 @@ func doReduce(
 	// file.Close()
 
 	kvMap := make(map[string][]string)
-	for i:=0; i<nMap; i++ {
+	for i := 0; i < nMap; i++ {
 		fileName := reduceName(jobName, i, reduceTaskNumber)
 		fd, err := os.Open(fileName)
 		if err != nil {
 			panic(err)
 		}
 		decoder := json.NewDecoder(fd)
-		for  {
+		for {
 			var kv KeyValue
 			err = decoder.Decode(&kv)
 			if err != nil {

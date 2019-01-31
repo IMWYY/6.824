@@ -23,7 +23,6 @@ const (
 // Check if we have N numbers in output file
 
 // Split in words
-// 分割单词
 func MapFunc(file string, value string) (res []KeyValue) {
 	words := strings.Fields(value)
 	for _, w := range words {
@@ -163,8 +162,7 @@ func TestSequentialMany(t *testing.T) {
 func TestBasic(t *testing.T) {
 	mr := setup()
 	for i := 0; i < 2; i++ {
-		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)),
-			MapFunc, ReduceFunc, -1)
+		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)), MapFunc, ReduceFunc, -1)
 	}
 	mr.Wait()
 	check(t, mr.files)
@@ -175,10 +173,8 @@ func TestBasic(t *testing.T) {
 func TestOneFailure(t *testing.T) {
 	mr := setup()
 	// Start 2 workers that fail after 10 tasks
-	go RunWorker(mr.address, port("worker"+strconv.Itoa(0)),
-		MapFunc, ReduceFunc, 10)
-	go RunWorker(mr.address, port("worker"+strconv.Itoa(1)),
-		MapFunc, ReduceFunc, -1)
+	go RunWorker(mr.address, port("worker"+strconv.Itoa(0)), MapFunc, ReduceFunc, 10)
+	go RunWorker(mr.address, port("worker"+strconv.Itoa(1)), MapFunc, ReduceFunc, -1)
 	mr.Wait()
 	check(t, mr.files)
 	checkWorker(t, mr.stats)
