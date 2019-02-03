@@ -106,7 +106,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 
 type Network struct {
 	mu             sync.Mutex
-	reliable       bool
+	reliable       bool // 数据包可能丢并且延迟增长
 	longDelays     bool // pause a long time on send on disabled connection
 	longReordering bool
 	ends           map[interface{}]*ClientEnd // ends, by name
