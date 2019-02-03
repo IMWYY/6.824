@@ -353,11 +353,9 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 4) % servers)
 
 	// lots of successful commands to new group.
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!first start ")
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!first end")
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
@@ -383,19 +381,15 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 
 	// lots of successful commands to new group.
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!second start")
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!second end")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!third start")
 	cfg.one(rand.Int(), servers)
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!third end")
 
 	fmt.Printf("  ... Passed\n")
 }
