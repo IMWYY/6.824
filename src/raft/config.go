@@ -79,10 +79,8 @@ func (cfg *config) crash1(i int) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
-	// a fresh persister, in case old instance
-	// continues to update the Persister.
-	// but copy old persister's content so that we always
-	// pass Make() the last persisted state.
+	// a fresh persister, in case old instance continues to update the Persister.
+	// but copy old persister's content so that we always pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
@@ -122,18 +120,12 @@ func (cfg *config) start1(i int) {
 	for j := 0; j < cfg.n; j++ {
 		ends[j] = cfg.net.MakeEnd(cfg.endnames[i][j])
 		cfg.net.Connect(cfg.endnames[i][j], j)
-		// cfg.endnames[i][j]：索引j表示连接到的服务器，索引i为自身
-		// 0 : 0->0 0->1 0->2	00 01 02
-		// 1 : 1->0 1->1 1->2	10 11 12
-		// 2 : 2->0 2->1 2->2	20 21 22
 	}
 
 	cfg.mu.Lock()
 
-	// a fresh persister, so old instance doesn't overwrite
-	// new instance's persisted state.
-	// but copy old persister's content so that we always
-	// pass Make() the last persisted state.
+	// a fresh persister, so old instance doesn't overwrite new instance's persisted state.
+	// but copy old persister's content so that we always pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	} else {
@@ -146,52 +138,46 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
-			err_msg := ""
+			errMsg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
 			} else if v, ok := (m.Command).(int); ok {
 				cfg.mu.Lock()
-				// 日志处理 遍历全部的日志系列
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.Index]; oldok && old != v {
 						// some server has already committed a different value for this entry!
-						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
+						errMsg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 							m.Index, i, m.Command, j, old)
 					}
 				}
 
-				// 添加日志
-				_, prevok := cfg.logs[i][m.Index-1] // map中是否存在key：m.Index-1
-				cfg.logs[i][m.Index] = v
+				_, prevok := cfg.logs[i][m.Index-1]
+				cfg.logs[i][m.Index] = v // 将提交的command写入到对应的server的index
 				cfg.mu.Unlock()
 
-				// 索引肯定是从开始，排除是一个情况
-				// 如果之前的不存在，那么这台服务上面的日志已经乱序
-				if m.Index > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
+				// 如果该log不是第一个 并且之前的不存在，那么这台服务上面的日志已经乱序
+				if m.Index > 1 && !prevok {
+					errMsg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
-				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)
+				errMsg = fmt.Sprintf("committed command %v is not an int", m.Command)
 			}
 
-			if err_msg != "" {
-				log.Fatalf("apply error: %v\n", err_msg)
-				cfg.applyErr[i] = err_msg
+			if errMsg != "" {
+				log.Fatalf("apply error: %v\n", errMsg)
+				cfg.applyErr[i] = errMsg
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
 		}
 	}()
 
-	// 创建Raft实例,启动心跳准备超时进行选举
 	rf := Make(ends, i, cfg.saved[i], applyCh)
 
-	// 记录自己的位置
 	cfg.mu.Lock()
 	cfg.rafts[i] = rf
 	cfg.mu.Unlock()
 
-	// 创建提供Raft相关方法的实例，添加到本网络
 	svc := labrpc.MakeService(rf)
 	srv := labrpc.MakeServer()
 	srv.AddService(svc)
@@ -213,23 +199,18 @@ func (cfg *config) connect(i int) {
 
 	cfg.connected[i] = true
 
-	// func (cfg *config) start1(i int)构建的连接关系
-	// cfg.endnames[i][j]：索引j表示连接到的服务器，索引i为自身
 	// 0 : 0->0 0->1 0->2	00 01 02
 	// 1 : 1->0 1->1 1->2	10 11 12
-	// 2 : 2->0 2->1 2->2	20 21 22
+	// 2 : 2->0 2->1 2->2	20 21 22// outgoing ClientEnds
 
-	// outgoing ClientEnds
-	// cfg.endnames[i][j] 是主动连接上来的，所以是outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.connected[j] {
 			endname := cfg.endnames[i][j]
-			cfg.net.Enable(endname, true) // 使连接到这个服务器的客户端上线
+			cfg.net.Enable(endname, true)
 		}
 	}
 
 	// incoming ClientEnds
-	// cfg.endnames[j][i] 是被动连接， 所以是incoming ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.connected[j] {
 			endname := cfg.endnames[j][i]
@@ -279,11 +260,11 @@ func (cfg *config) checkOneLeader() int {
 	for iters := 0; iters < 10; iters++ {
 		time.Sleep(500 * time.Millisecond)
 
-		leaders := make(map[int][]int) // key:currentTerm, value: 切片类型(Raft实例的索引)
+		leaders := make(map[int][]int) // key:currentTerm, value: leader(s)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
 				if t, leader := cfg.rafts[i].GetState(); leader {
-					leaders[t] = append(leaders[t], i) // 获取领导者个数
+					leaders[t] = append(leaders[t], i)
 				}
 			}
 		}
@@ -299,7 +280,7 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
-			return leaders[lastTermWithLeader][0] // 找到领导者，并返回领导者索引
+			return leaders[lastTermWithLeader][0]
 		}
 	}
 	cfg.t.Fatalf("expected one leader, got none")
@@ -326,8 +307,8 @@ func (cfg *config) checkTerms() int {
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
-			_, is_leader := cfg.rafts[i].GetState()
-			if is_leader {
+			_, isLeader := cfg.rafts[i].GetState()
+			if isLeader {
 				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
 			}
 		}
@@ -345,13 +326,11 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
-		DPrintf("index=%d, cfg-log: %v \n", index, cfg.logs)
 		cfg.mu.Unlock()
 
 		if ok {
 			if count > 0 && cmd != cmd1 {
-				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n",
-					index, cmd, cmd1)
+				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n", index, cmd, cmd1)
 			}
 			count += 1
 			cmd = cmd1
@@ -385,19 +364,16 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	}
 	nd, cmd := cfg.nCommitted(index)
 	if nd < n {
-		cfg.t.Fatalf("only %d decided for index %d; wanted %d\n",
-			nd, index, n)
+		cfg.t.Fatalf("only %d decided for index %d; wanted %d\n", nd, index, n)
 	}
 	return cmd
 }
 
 //
 // do a complete agreement.
-// it might choose the wrong leader initially,
-// and have to re-submit after giving up.
+// it might choose the wrong leader initially, and have to re-submit after giving up.
 // entirely gives up after about 10 seconds.
-// indirectly checks that the servers agree on the
-// same value, since nCommitted() checks this,
+// indirectly checks that the servers agree on the same value, since nCommitted() checks this,
 // as do the threads that read from applyCh.
 // returns index.
 //
@@ -406,7 +382,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
-		index := -1
+		logIndex := -1
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
@@ -418,25 +394,23 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
-					index = index1
-					DPrintf("Leader(%d) start cmd(%d), index=%d \n", si, cmd, index)
+					logIndex = index1
+					DPrintf("Leader(%d) start cmd(%d), logIndex(%d) \n", si, cmd, logIndex)
 					break
 				}
 			}
 		}
 
-		if index != -1 {
-			// somebody claimed to be the leader and to have
-			// submitted our command; wait a while for agreement.
+		if logIndex != -1 {
+			// somebody claimed to be the leader and to have submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				nd, cmd1 := cfg.nCommitted(index)
-				DPrintf("cfg.nCommitted nd=%d \n", nd)
+				nd, cmd1 := cfg.nCommitted(logIndex)
+				DPrintf("cfg.one cmd(%d), nCommitted(%d) \n", cmd, nd)
 				if nd > 0 && nd >= expectedServers {
-					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
-						// and it was the command we submitted.
-						return index
+						// committed and it was the command we submitted.
+						return logIndex
 					}
 				}
 				time.Sleep(20 * time.Millisecond)

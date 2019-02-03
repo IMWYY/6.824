@@ -681,7 +681,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 					rf.state = Leader
 					rf.nextIndex = make([]int, len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers))
-					//  When a leader first comes to power, it initializes all nextIndex values to the index
+					// When a leader first comes to power, it initializes all nextIndex values to the index
 					// just after the last one in its log
 					for i := range rf.peers {
 						rf.nextIndex[i] = rf.getLastLogIndex() + 1
