@@ -55,26 +55,21 @@ func (js *JunkServer) Handler5(args JunkArgs, reply *JunkReply) {
 //	export GOPATH=/home/frank/workspace/Distributed-Systems/6.824
 //	cd ${GOPATH}/src/labrpc
 //      go test -v
-//      go test -v -run  TestBasic		// 测试单个函数
+//      go test -v -run  TestBasic
 
 func TestBasic(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	// 创建网络
 	rn := MakeNetwork()
-	// 创建客户端,并存在于此网络
 	e := rn.MakeEnd("end1-99")
 
-	// 创建服务，服务提供者是JunkServer
 	js := &JunkServer{}
 	svc := MakeService(js)
 
-	// 创建服务器对象，并添加到此网络
 	rs := MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 
-	// 客户端连接到服务器
 	rn.Connect("end1-99", "server99")
 	rn.Enable("end1-99", true)
 

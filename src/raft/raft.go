@@ -38,7 +38,11 @@ const (
 
 const (
 	VoteNull          = -1
-	HeartbeatInterval = 50 * time.Millisecond
+	HeartbeatInterval = 150 * time.Millisecond
+	// The tester requires that the leader send heartbeat RPCs no more than ten times per second
+	ElectionTimeoutBase  = 200
+	ElectionTimeoutDelta = 150
+	// use an election timeout larger than the paper's 150 to 300
 )
 
 func (s RaftState) String() string {
@@ -79,8 +83,6 @@ type Raft struct {
 	persister *Persister
 	me        int // index into peers[]
 
-	state RaftState
-
 	// all servers persistent
 	currentTerm int
 	votedFor    int
@@ -95,6 +97,7 @@ type Raft struct {
 	matchIndex []int
 
 	// additional
+	state         RaftState
 	voteCount     int
 	chanCommit    chan bool
 	chanHeartbeat chan bool
@@ -169,9 +172,9 @@ func (rf *Raft) getLastLogTerm() int {
 	return rf.log[len(rf.log)-1].Term
 }
 
-// random election timeout 150-300ms
+// random election timeout slightly larger than 150-300ms
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Intn(150)+150) * time.Millisecond
+	return time.Duration(rand.Intn(ElectionTimeoutBase)+ElectionTimeoutDelta) * time.Millisecond
 }
 
 // save Raft's persistent state to stable storage,
@@ -600,6 +603,7 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.persist()
 }
 
+//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -609,6 +613,7 @@ func (rf *Raft) convertToFollower(term int) {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+//
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers

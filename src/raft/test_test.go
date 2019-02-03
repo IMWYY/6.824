@@ -23,7 +23,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 // go test -v  -run TestInitialElection
 func TestInitialElection(t *testing.T) {
 	servers := 3
-	cfg := make_config(t, servers, false) // servers是实例数量,false为不可靠网络(创建Raft实例)
+	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test: initial election ...\n")

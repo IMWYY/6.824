@@ -27,37 +27,35 @@ func randstring(n int) string {
 }
 
 type config struct {
-	mu   sync.Mutex
-	t    *testing.T
-	net  *labrpc.Network
-	n    int
-	done int32           // tell internal threads to die
-	// 下面slice的长度都为n
-	rafts     []*Raft       // 管理主机实例,数量为n
-	applyErr  []string      // from apply channel readers
-	connected []bool        // whether each server is on the net
-	saved     []*Persister  // 数据持久化：Raft状态值和快照数据
+	mu        sync.Mutex
+	t         *testing.T
+	net       *labrpc.Network
+	n         int
+	done      int32 // tell internal threads to die
+	rafts     []*Raft
+	applyErr  []string // from apply channel readers
+	connected []bool   // whether each server is on the net
+	saved     []*Persister
 	endnames  [][]string    // the port file names each sends to
 	logs      []map[int]int // copy of each server's committed entries,
 }
 
-// 构建测试环境
 func make_config(t *testing.T, n int, unreliable bool) *config {
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
-	cfg.net = labrpc.MakeNetwork() // 构建测试网络
+	cfg.net = labrpc.MakeNetwork()
 	cfg.n = n
 	cfg.applyErr = make([]string, cfg.n)
-	cfg.rafts = make([]*Raft, cfg.n) //  构建cfg.n个Raft实例
+	cfg.rafts = make([]*Raft, cfg.n)
 	cfg.connected = make([]bool, cfg.n)
 	cfg.saved = make([]*Persister, cfg.n)
 	cfg.endnames = make([][]string, cfg.n)
 	cfg.logs = make([]map[int]int, cfg.n)
 
-	cfg.setunreliable(unreliable) // 设置网络为不可靠网络
+	cfg.setunreliable(unreliable)
 
-	cfg.net.LongDelays(true) // 存在长延时的网络
+	cfg.net.LongDelays(true)
 
 	// create a full set of Rafts.
 	for i := 0; i < cfg.n; i++ {
@@ -104,9 +102,11 @@ func (cfg *config) crash1(i int) {
 	}
 }
 
+//
 // start or re-start a Raft. if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new state persister,
 // to isolate previous instance of this server. since we cannot really kill it.
+//
 func (cfg *config) start1(i int) {
 	cfg.crash1(i)
 
@@ -391,6 +391,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	return cmd
 }
 
+//
 // do a complete agreement.
 // it might choose the wrong leader initially,
 // and have to re-submit after giving up.
@@ -399,6 +400,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // same value, since nCommitted() checks this,
 // as do the threads that read from applyCh.
 // returns index.
+//
 func (cfg *config) one(cmd int, expectedServers int) int {
 	t0 := time.Now()
 	starts := 0
@@ -417,7 +419,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
-					DPrintf("Leader(%d) start cmd(%d), index=%d \n", si , cmd, index)
+					DPrintf("Leader(%d) start cmd(%d), index=%d \n", si, cmd, index)
 					break
 				}
 			}
