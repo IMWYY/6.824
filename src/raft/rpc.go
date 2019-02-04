@@ -155,20 +155,22 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 }
 
 type InstallSnapshotArgs struct {
-	Term              int
-	LeaderId          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Data              []byte
+	Term              int    //leader’s term
+	LeaderId          int    //so follower can redirect clients
+	LastIncludedIndex int    //the snapshot replaces all entries up through and including this index
+	LastIncludedTerm  int    //term of lastIncludedIndex
+	Data              []byte //raw bytes of the snapshot chunk, starting at offset
 }
 
 type InstallSnapshotReply struct {
-	Term int
+	Term int //currentTerm, for leader to update itself
 }
 
 func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// 1. Reply immediately if term < currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return
