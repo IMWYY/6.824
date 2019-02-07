@@ -1,20 +1,10 @@
 package labrpc
 
-import (
-	"bytes"
-	"encoding/gob"
-	"fmt"
-	"log"
-	"math/rand"
-	"reflect"
-	"strings"
-	"sync"
-	"time"
-)
-
 //
 // channel-based RPC, for 824 labs.
-// allows tests to disconnect RPC connections.
+//
+// simulates a network that can lose requests, lose replies,
+// delay messages, and entirely disconnect particular hosts.
 //
 // we will use the original labrpc.go to test your code for grading.
 // so, while you can modify this code to help you debug, please
@@ -22,7 +12,7 @@ import (
 //
 // adapted from Go net/rpc/server.go.
 //
-// sends gob-encoded values to ensure that RPCs
+// sends labgob-encoded values to ensure that RPCs
 // don't include references to program objects.
 //
 // net := MakeNetwork() -- holds network, clients, servers.
@@ -36,25 +26,38 @@ import (
 // end.Call("Raft.AppendEntries", &args, &reply) -- send an RPC, wait for reply.
 // the "Raft" is the name of the server struct to be called.
 // the "AppendEntries" is the name of the method to be called.
-// Call() returns true to indicate that the server executed the request and the reply is valid.
-// Call() returns false if the network lost the request or reply or the server is down.
+// Call() returns true to indicate that the server executed the request
+// and the reply is valid.
+// Call() returns false if the network lost the request or reply
+// or the server is down.
 // It is OK to have multiple Call()s in progress at the same time on the
 // same ClientEnd.
-// Concurrent calls to Call() may be delivered to the server out of order, since the network may re-order messages.
+// Concurrent calls to Call() may be delivered to the server out of order,
+// since the network may re-order messages.
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
 // handler function on the server side does not return.
-// That is, there is no need to implement your own timeouts around Call().
 // the server RPC handler function must declare its args and reply arguments
 // as pointers, so that their types exactly match the types of the arguments
 // to Call().
 //
 // srv := MakeServer()
-// srv.AddService(svc)
-// -- a server can have multiple services, e.g. Raft and k/v pass srv to net.AddServer()
+// srv.AddService(svc) -- a server can have multiple services, e.g. Raft and k/v
+//   pass srv to net.AddServer()
 //
-// svc := MakeService(receiverObject)
-// -- obj's methods will handle RPCs much like Go's rpcs.Register()  pass svc to srv.AddService()
+// svc := MakeService(receiverObject) -- obj's methods will handle RPCs
+//   much like Go's rpcs.Register()
+//   pass svc to srv.AddService()
 //
+
+import "labgob"
+import "bytes"
+import "reflect"
+import "sync"
+import "log"
+import "strings"
+import "math/rand"
+import "time"
+import "sync/atomic"
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -70,13 +73,14 @@ type replyMsg struct {
 }
 
 type ClientEnd struct {
-	endname interface{} // this end-point's name
-	ch      chan reqMsg // copy of Network.endCh
+	endname interface{}   // this end-point's name
+	ch      chan reqMsg   // copy of Network.endCh
+	done    chan struct{} // closed when Network is cleaned up
 }
 
 // send an RPC, wait for the reply.
-// the return value indicates success;
-// false means the server couldn't be contacted.
+// the return value indicates success; false means that
+// no reply was received from the server.
 func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
 	req := reqMsg{}
 	req.endname = e.endname
@@ -85,16 +89,21 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	req.replyCh = make(chan replyMsg)
 
 	qb := new(bytes.Buffer)
-	qe := gob.NewEncoder(qb)
+	qe := labgob.NewEncoder(qb)
 	qe.Encode(args)
 	req.args = qb.Bytes()
 
-	e.ch <- req
+	select {
+	case e.ch <- req:
+		// ok
+	case <-e.done:
+		return false
+	}
 
 	rep := <-req.replyCh
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
-		rd := gob.NewDecoder(rb)
+		rd := labgob.NewDecoder(rb)
 		if err := rd.Decode(reply); err != nil {
 			log.Fatalf("ClientEnd.Call(): decode reply: %v\n", err)
 		}
@@ -106,14 +115,16 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 
 type Network struct {
 	mu             sync.Mutex
-	reliable       bool // 数据包可能丢并且延迟增长
-	longDelays     bool // pause a long time on send on disabled connection
-	longReordering bool
-	ends           map[interface{}]*ClientEnd // ends, by name
-	enabled        map[interface{}]bool
+	reliable       bool
+	longDelays     bool                        // pause a long time on send on disabled connection
+	longReordering bool                        // sometimes delay replies a long time
+	ends           map[interface{}]*ClientEnd  // ends, by name
+	enabled        map[interface{}]bool        // by end name
 	servers        map[interface{}]*Server     // servers, by name
 	connections    map[interface{}]interface{} // endname -> servername
 	endCh          chan reqMsg
+	done           chan struct{} // closed when Network is cleaned up
+	count          int32         // total RPC count, for statistics
 }
 
 func MakeNetwork() *Network {
@@ -124,15 +135,26 @@ func MakeNetwork() *Network {
 	rn.servers = map[interface{}]*Server{}
 	rn.connections = map[interface{}](interface{}){}
 	rn.endCh = make(chan reqMsg)
+	rn.done = make(chan struct{})
 
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
-		for xreq := range rn.endCh {
-			go rn.ProcessReq(xreq)
+		for {
+			select {
+			case xreq := <-rn.endCh:
+				atomic.AddInt32(&rn.count, 1)
+				go rn.ProcessReq(xreq)
+			case <-rn.done:
+				return
+			}
 		}
 	}()
 
 	return rn
+}
+
+func (rn *Network) Cleanup() {
+	close(rn.done)
 }
 
 func (rn *Network) Reliable(yes bool) {
@@ -146,18 +168,19 @@ func (rn *Network) LongReordering(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
-	rn.longReordering = yes // sometimes delay replies a long time
+	rn.longReordering = yes
 }
 
 func (rn *Network) LongDelays(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
-	rn.longDelays = yes // pause a long time on send on disabled connection
+	rn.longDelays = yes
 }
 
-func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool, servername interface{},
-	server *Server, reliable bool, longreordering bool) {
+func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool,
+	servername interface{}, server *Server, reliable bool, longreordering bool,
+) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
@@ -185,12 +208,13 @@ func (rn *Network) ProcessReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.ReadEndnameInfo(req.endname)
 
 	if enabled && servername != nil && server != nil {
-		if !reliable {
-			ms := rand.Int() % 27
+		if reliable == false {
+			// short delay
+			ms := (rand.Int() % 27)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
-		if !reliable && (rand.Int()%1000) < 100 {
+		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 			return
@@ -200,10 +224,10 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// in a separate thread so that we can periodically check
 		// if the server has been killed and the RPC should get a
 		// failure reply.
-		respch := make(chan replyMsg)
+		ech := make(chan replyMsg)
 		go func() {
 			r := server.dispatch(req)
-			respch <- r
+			ech <- r
 		}()
 
 		// wait for handler to return,
@@ -212,12 +236,17 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		var reply replyMsg
 		replyOK := false
 		serverDead := false
-		for !replyOK && !serverDead {
+		for replyOK == false && serverDead == false {
 			select {
-			case reply = <-respch:
+			case reply = <-ech:
 				replyOK = true
 			case <-time.After(100 * time.Millisecond):
 				serverDead = rn.IsServerDead(req.endname, servername, server)
+				if serverDead {
+					go func() {
+						<-ech // drain channel to let the goroutine created earlier terminate
+					}()
+				}
 			}
 		}
 
@@ -229,17 +258,21 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// DeleteServer() before superseding the Persister.
 		serverDead = rn.IsServerDead(req.endname, servername, server)
 
-		if !replyOK || serverDead {
+		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			req.replyCh <- replyMsg{false, nil}
-		} else if !reliable && (rand.Int()%1000) < 100 {
+		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
-		} else if longreordering && rand.Intn(900) < 600 {
+		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
 			ms := 200 + rand.Intn(1+rand.Intn(2000))
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-			req.replyCh <- reply
+			// Russ points out that this timer arrangement will decrease
+			// the number of goroutines, so that the race
+			// detector is less likely to get upset.
+			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+				req.replyCh <- reply
+			})
 		} else {
 			req.replyCh <- reply
 		}
@@ -247,15 +280,19 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// simulate no reply and eventual timeout.
 		ms := 0
 		if rn.longDelays {
-			// let Raft tests check that leader doesn't send RPCs synchronously.
-			ms = rand.Int() % 7000
+			// let Raft tests check that leader doesn't send
+			// RPCs synchronously.
+			ms = (rand.Int() % 7000)
 		} else {
-			// many kv tests require the client to try each server in fairly rapid succession.
-			ms = rand.Int() % 100
+			// many kv tests require the client to try each
+			// server in fairly rapid succession.
+			ms = (rand.Int() % 100)
 		}
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-		req.replyCh <- replyMsg{false, nil}
+		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+			req.replyCh <- replyMsg{false, nil}
+		})
 	}
+
 }
 
 // create a client end-point.
@@ -271,6 +308,7 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	e := &ClientEnd{}
 	e.endname = endname
 	e.ch = rn.endCh
+	e.done = rn.done
 	rn.ends[endname] = e
 	rn.enabled[endname] = false
 	rn.connections[endname] = nil
@@ -318,13 +356,20 @@ func (rn *Network) GetCount(servername interface{}) int {
 	return svr.GetCount()
 }
 
+func (rn *Network) GetTotalCount() int {
+	x := atomic.LoadInt32(&rn.count)
+	return int(x)
+}
+
+//
 // a server is a collection of services, all sharing
 // the same rpc dispatcher. so that e.g. both a Raft
 // and a k/v server can listen to the same rpc endpoint.
+//
 type Server struct {
 	mu       sync.Mutex
 	services map[string]*Service
-	count    int
+	count    int // incoming RPCs
 }
 
 func MakeServer() *Server {
@@ -356,8 +401,8 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 	if ok {
 		return service.dispatch(methodName, req)
 	} else {
-		var choices []string
-		for k := range rs.services {
+		choices := []string{}
+		for k, _ := range rs.services {
 			choices = append(choices, k)
 		}
 		log.Fatalf("labrpc.Server.dispatch(): unknown service %v in %v.%v; expecting one of %v\n",
@@ -402,7 +447,7 @@ func MakeService(rcvr interface{}) *Service {
 			mtype.In(2).Kind() != reflect.Ptr ||
 			mtype.NumOut() != 0 {
 			// the method is not suitable for a handler
-			fmt.Printf("bad method: %v\n", mname)
+			//fmt.Printf("bad method: %v\n", mname)
 		} else {
 			// the method looks like a handler
 			svc.methods[mname] = method
@@ -420,7 +465,7 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 
 		// decode the argument.
 		ab := bytes.NewBuffer(req.args)
-		ad := gob.NewDecoder(ab)
+		ad := labgob.NewDecoder(ab)
 		ad.Decode(args.Interface())
 
 		// allocate space for the reply.
@@ -434,13 +479,13 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 
 		// encode the reply.
 		rb := new(bytes.Buffer)
-		re := gob.NewEncoder(rb)
+		re := labgob.NewEncoder(rb)
 		re.EncodeValue(replyv)
 
 		return replyMsg{true, rb.Bytes()}
 	} else {
-		var choices []string
-		for k := range svc.methods {
+		choices := []string{}
+		for k, _ := range svc.methods {
 			choices = append(choices, k)
 		}
 		log.Fatalf("labrpc.Service.dispatch(): unknown method %v in %v; expecting one of %v\n",

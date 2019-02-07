@@ -31,8 +31,10 @@ const (
 	Candidate
 	Follower
 
-	HeartbreakInterval = 150 * time.Millisecond
-	VoteNull           = -1
+	HeartbeatInterval    = 150 * time.Millisecond
+	ElectionTimeoutBase  = 300
+	ElectionTimeoutDelta = 151
+	VoteNull             = -1
 )
 
 //
@@ -102,7 +104,7 @@ func (rf *Raft) getLastTerm() int {
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int63()%151+300) * time.Millisecond
+	return time.Duration(rand.Int63()%ElectionTimeoutDelta+ElectionTimeoutBase) * time.Millisecond
 }
 
 // save Raft's persistent state to stable storage,
@@ -320,7 +322,8 @@ func (rf *Raft) broadcastAppendEntries() {
 	}
 
 	for i := range rf.peers {
-		if i != rf.me && rf.state == Leader {
+		if i != rf.me && rf.state == Leader { // here we need to check the state of raft in case we receive an outdated request
+
 			if rf.nextIndex[i] > baseIndex {
 				entries := make([]LogEntry, len(rf.log[rf.nextIndex[i]-baseIndex:]))
 				copy(entries, rf.log[rf.nextIndex[i]-baseIndex:])
@@ -362,6 +365,10 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}(i, args)
 			} else {
+				// todo check snapshot
+				// if follower's log ends before leader's log starts
+				// nextIndex[i] will back up to start of leader's log
+				// so leader can't repair that follower with AppendEntries RPCs thus the InstallSnapshot RPC
 				snapShortArgs := InstallSnapshotArgs{
 					Term:              rf.currentTerm,
 					LeaderId:          rf.me,
@@ -439,7 +446,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 				}
 			case Leader:
 				rf.broadcastAppendEntries()
-				time.Sleep(HeartbreakInterval)
+				time.Sleep(HeartbeatInterval)
 			case Candidate:
 				rf.mu.Lock()
 				rf.currentTerm++

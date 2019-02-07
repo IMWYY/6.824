@@ -78,15 +78,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 type AppendEntriesArgs struct {
 	Term         int        // leader’s term
 	LeaderId     int        // so follower can redirect clients
-	PrevLogTerm  int        //term of prevLogIndex entry
-	PrevLogIndex int        //index of log entry immediately preceding new ones
-	Entries      []LogEntry //log entries to store (empty for heartbeat; may send more than one for efficiency
-	LeaderCommit int        //leader’s commitIndex
+	PrevLogTerm  int        // term of prevLogIndex entry
+	PrevLogIndex int        // index of log entry immediately preceding new ones
+	Entries      []LogEntry // log entries to store (empty for heartbeat; may send more than one for efficiency
+	LeaderCommit int        // leader’s commitIndex
 }
 
 type AppendEntriesReply struct {
-	Term      int  //currentTerm, for leader to update itself
-	Success   bool //true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term      int  // currentTerm, for leader to update itself
+	Success   bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 	NextIndex int  // back to nextIndex. accelerated log backtracking
 }
 
@@ -143,6 +143,11 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.log = append(rf.log, args.Entries...)
 		reply.Success = true
 		reply.NextIndex = rf.getLastIndex() + 1
+	} else {
+		// todo handle baseIndex
+		// it is correct for the recipient to ignore an InstallSnapshot if the
+		// recipient is already ahead of that snapshot. This case can arise in Lab 3
+		// for example if the RPC system delivers RPCs out of order.
 	}
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
