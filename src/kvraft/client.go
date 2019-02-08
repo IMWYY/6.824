@@ -1,13 +1,24 @@
 package raftkv
 
-import "labrpc"
+import (
+	"labrpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	lastSuccessServer int
+
+	mu sync.Mutex
+}
+
+// wrapped Response used in channel
+type RespMsg struct {
+	msg string
 }
 
 func nrand() int64 {
@@ -38,7 +49,17 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key: key,
+	}
+	respCh := make(chan RespMsg)
+	ck.Call("KVServer.Get", args, respCh)
+
+	var resp RespMsg
+	select {
+	case resp = <-respCh:
+		return resp.msg
+	}
 }
 
 //
@@ -52,7 +73,61 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+
+	respCh := make(chan RespMsg)
+	ck.Call("KVServer.PutAppend", args, respCh)
+
+	var resp RespMsg
+	select {
+	case resp = <-respCh:
+		return
+	}
+}
+
+func (ck *Clerk) Call(method string, args interface{}, respCh chan RespMsg) {
+	ck.mu.Lock()
+	prefer := ck.lastSuccessServer
+	ck.mu.Unlock()
+	ret := ""
+
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = prefer
+		ck.mu.Unlock()
+
+		respCh <- RespMsg{
+			msg: ret,
+		}
+	}()
+
+	// todo 可能异步同时多个重试好一些
+	// keeps trying forever in the face of all other errors.
+	offset := int64(prefer)
+	for {
+		id := int(offset % int64(len(ck.servers)))
+		var reply GetReply
+		if ck.servers[id].Call(method, args, &reply) {
+			// Get returns "" if the key does not exist.
+			if method == "KVServer.Get" && reply.Err == ErrNoKey {
+				prefer = id
+				return
+			}
+			if !reply.WrongLeader && len(reply.Err) == 0 {
+				prefer = id
+				ret = reply.Value
+				return
+			}
+		}
+
+		offset = nrand()
+
+		DPrintf("Clerk.Call fail: id=%d, need retry", id)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
