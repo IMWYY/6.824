@@ -102,8 +102,7 @@ func (cfg *config) SnapshotSize() int {
 	return snapshotsize
 }
 
-// attach server i to servers listed in to
-// caller must hold cfg.mu
+// attach server i to servers listed in to caller must hold cfg.mu
 func (cfg *config) connectUnlocked(i int, to []int) {
 	// log.Printf("connect peer %d to %v\n", i, to)
 
@@ -222,9 +221,9 @@ func (cfg *config) deleteClient(ck *Clerk) {
 // caller should hold cfg.mu
 func (cfg *config) ConnectClientUnlocked(ck *Clerk, to []int) {
 	// log.Printf("ConnectClient %v to %v\n", ck, to)
-	endnames := cfg.clerks[ck]
+	endNames := cfg.clerks[ck]
 	for j := 0; j < len(to); j++ {
-		s := endnames[to[j]]
+		s := endNames[to[j]]
 		cfg.net.Enable(s, true)
 	}
 }
@@ -238,9 +237,9 @@ func (cfg *config) ConnectClient(ck *Clerk, to []int) {
 // caller should hold cfg.mu
 func (cfg *config) DisconnectClientUnlocked(ck *Clerk, from []int) {
 	// log.Printf("DisconnectClient %v from %v\n", ck, from)
-	endnames := cfg.clerks[ck]
+	endNames := cfg.clerks[ck]
 	for j := 0; j < len(from); j++ {
-		s := endnames[from[j]]
+		s := endNames[from[j]]
 		cfg.net.Enable(s, false)
 	}
 }
@@ -327,8 +326,8 @@ func (cfg *config) Leader() (bool, int) {
 	defer cfg.mu.Unlock()
 
 	for i := 0; i < cfg.n; i++ {
-		_, is_leader := cfg.kvservers[i].rf.GetState()
-		if is_leader {
+		_, isLeader := cfg.kvservers[i].rf.GetState()
+		if isLeader {
 			return true, i
 		}
 	}
@@ -355,10 +354,10 @@ func (cfg *config) make_partition() ([]int, []int) {
 	return p1, p2
 }
 
-var ncpu_once sync.Once
+var ncpuOnce sync.Once
 
 func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config {
-	ncpu_once.Do(func() {
+	ncpuOnce.Do(func() {
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
 		}

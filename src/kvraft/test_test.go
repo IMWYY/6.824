@@ -76,7 +76,7 @@ func NextValue(prev string, val string) string {
 // check that for a specific client all known appends are present in a value,
 // and in order
 func checkClntAppends(t *testing.T, clnt int, v string, count int) {
-	lastoff := -1
+	lastOff := -1
 	for j := 0; j < count; j++ {
 		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
 		off := strings.Index(v, wanted)
@@ -87,10 +87,10 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		if off1 != off {
 			t.Fatalf("duplicate element %v in Append result", wanted)
 		}
-		if off <= lastoff {
+		if off <= lastOff {
 			t.Fatalf("wrong order for element %v in Append result", wanted)
 		}
-		lastoff = off
+		lastOff = off
 	}
 }
 
@@ -124,7 +124,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 	for atomic.LoadInt32(done) == 0 {
 		a := make([]int, cfg.n)
 		for i := 0; i < cfg.n; i++ {
-			a[i] = (rand.Int() % 2)
+			a[i] = rand.Int() % 2
 		}
 		pa := make([][]int, 2)
 		for i := 0; i < 2; i++ {
@@ -181,17 +181,17 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 
 	ck := cfg.makeClient(cfg.All())
 
-	done_partitioner := int32(0)
-	done_clients := int32(0)
-	ch_partitioner := make(chan bool)
+	donePartitioner := int32(0)
+	doneClients := int32(0)
+	chPartitioner := make(chan bool)
 	clnts := make([]chan int, nclients)
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
-		atomic.StoreInt32(&done_clients, 0)
-		atomic.StoreInt32(&done_partitioner, 0)
+		atomic.StoreInt32(&doneClients, 0)
+		atomic.StoreInt32(&donePartitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
 			j := 0
 			defer func() {
@@ -200,7 +200,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			last := ""
 			key := strconv.Itoa(cli)
 			Put(cfg, myck, key, last)
-			for atomic.LoadInt32(&done_clients) == 0 {
+			for atomic.LoadInt32(&doneClients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
@@ -220,16 +220,16 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		if partitions {
 			// Allow the clients to perform some operations without interruption
 			time.Sleep(1 * time.Second)
-			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
+			go partitioner(t, cfg, chPartitioner, &donePartitioner)
 		}
 		time.Sleep(5 * time.Second)
 
-		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
-		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
+		atomic.StoreInt32(&doneClients, 1)     // tell clients to quit
+		atomic.StoreInt32(&donePartitioner, 1) // tell partitioner to quit
 
 		if partitions {
 			// log.Printf("wait for partitioner\n")
-			<-ch_partitioner
+			<-chPartitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term
@@ -316,23 +316,23 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 	var operations []linearizability.Operation
 	var opMu sync.Mutex
 
-	done_partitioner := int32(0)
-	done_clients := int32(0)
-	ch_partitioner := make(chan bool)
+	donePartitioner := int32(0)
+	doneClients := int32(0)
+	chPartitioner := make(chan bool)
 	clnts := make([]chan int, nclients)
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
-		atomic.StoreInt32(&done_clients, 0)
-		atomic.StoreInt32(&done_partitioner, 0)
+		atomic.StoreInt32(&doneClients, 0)
+		atomic.StoreInt32(&donePartitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
 			j := 0
 			defer func() {
 				clnts[cli] <- j
 			}()
-			for atomic.LoadInt32(&done_clients) == 0 {
+			for atomic.LoadInt32(&doneClients) == 0 {
 				key := strconv.Itoa(rand.Int() % nclients)
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				var inp linearizability.KvInput
@@ -362,16 +362,16 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 		if partitions {
 			// Allow the clients to perform some operations without interruption
 			time.Sleep(1 * time.Second)
-			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
+			go partitioner(t, cfg, chPartitioner, &donePartitioner)
 		}
 		time.Sleep(5 * time.Second)
 
-		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
-		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
+		atomic.StoreInt32(&doneClients, 1)     // tell clients to quit
+		atomic.StoreInt32(&donePartitioner, 1) // tell partitioner to quit
 
 		if partitions {
 			// log.Printf("wait for partitioner\n")
-			<-ch_partitioner
+			<-chPartitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term
