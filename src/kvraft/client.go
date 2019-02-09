@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"github.com/luci/go-render/render"
 	"labrpc"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 
 	lastSuccessServer int
+	nextReqId         int64
 
 	mu sync.Mutex
 }
@@ -34,7 +36,9 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.nextReqId = nrand()%1000001
+	ck.lastSuccessServer = 0
+
 	return ck
 }
 
@@ -53,6 +57,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
 	prefer := ck.lastSuccessServer
+	reqId := ck.nextReqId
+	ck.nextReqId ++
 	ck.mu.Unlock()
 
 	defer func() {
@@ -63,25 +69,27 @@ func (ck *Clerk) Get(key string) string {
 
 	offset := 0
 	args := GetArgs{
-		Key: key,
+		Key:   key,
+		ReqId: reqId,
 	}
-	var reply GetReply
 	for {
 		id := (prefer + offset) % len(ck.servers)
-		if ck.servers[id].Call("KVServer.Get", args, &reply) {
+		var reply GetReply
+		if ck.servers[id].Call("KVServer.Get", &args, &reply) {
 			// Get returns "" if the key does not exist.
 			if reply.Err == ErrNoKey {
 				prefer = id
 				return ""
 			}
-			if !reply.WrongLeader && len(reply.Err) == 0 {
+			if !reply.WrongLeader && (len(reply.Err) == 0 || reply.Err == OK) {
 				prefer = id
 				return reply.Value
 			}
+			DPrintf("Clerk.Get rpc return false: svcId=%d", id)
 		}
 		offset ++
 		time.Sleep(RetryInterval)
-		DPrintf("Clerk.Call fail: id=%d, need retry", id)
+		DPrintf("Clerk.Get fail: svcId=%d, need retry", id)
 	}
 }
 
@@ -98,6 +106,8 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
 	prefer := ck.lastSuccessServer
+	reqId := ck.nextReqId
+	ck.nextReqId ++
 	ck.mu.Unlock()
 	defer func() {
 		ck.mu.Lock()
@@ -111,19 +121,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Key:   key,
 		Value: value,
 		Op:    op,
+		ReqId: reqId,
 	}
-	var reply PutAppendReply
+
+	DPrintf("Clerk.PutAppend args=%v", render.Render(args))
+
 	for {
 		id := (prefer + offset) % len(ck.servers)
-		if ck.servers[id].Call("KVServer.PutAppend", args, &reply) {
-			if !reply.WrongLeader && len(reply.Err) == 0 {
+		var reply PutAppendReply
+		if ck.servers[id].Call("KVServer.PutAppend", &args, &reply) {
+			DPrintf("Clerk.PutAppend rpc return: svcId=%d, args=%v, reply=%v", id, render.Render(args), render.Render(reply))
+			if !reply.WrongLeader && (len(reply.Err) == 0 || reply.Err == OK) {
 				prefer = id
 				return
 			}
 		}
 		offset ++
 		time.Sleep(RetryInterval)
-		DPrintf("Clerk.Call fail: id=%d, need retry", id)
+		DPrintf("Clerk.PutAppend fail: id=%d, need retry", id)
 	}
 }
 

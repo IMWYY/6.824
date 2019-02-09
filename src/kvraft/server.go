@@ -29,6 +29,7 @@ type Op struct {
 	OpType string
 	Key    string
 	Value  string
+	ReqId  int64
 }
 
 type KVServer struct {
@@ -40,24 +41,26 @@ type KVServer struct {
 	maxRaftState int // snapshot if log grows this big
 
 	exitCh     chan struct{}
-	pendingReq map[int]chan<- raft.ApplyMsg // logIndex -> channel
+	pendingReq map[int]chan raft.ApplyMsg // logIndex -> channel
 	kvStore    map[string]string
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	err := kv.start(Op{
+	defer func() {
+		DPrintf("KVServer(%d).Get args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
+	}()
+
+	reply.Err = kv.start(Op{
 		OpType: OpTypeGet,
 		Key:    args.Key,
+		ReqId:  args.ReqId,
 	})
 
-	if len(err) > 0 {
-		reply.Err = err
-		if err == ErrWrongLeader {
-			reply.WrongLeader = true
-		}
-		return
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
 	}
+	return
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -70,31 +73,43 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	err := kv.start(Op{
+	defer func() {
+		DPrintf("KVServer(%d).PutAppend args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
+	}()
+
+	reply.Err = kv.start(Op{
 		OpType: args.Op,
 		Key:    args.Key,
 		Value:  args.Value,
+		ReqId:  args.ReqId,
 	})
 
-	if len(err) > 0 {
-		reply.Err = err
-		if err == ErrWrongLeader {
-			reply.WrongLeader = true
-		}
-		return
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
 	}
+	return
 }
 
+// One way to do this is for the server to detect that it has lost leadership,
+// by noticing that a different request has appeared at the index returned by Start(),
+// or that Raft's term has changed
 func (kv *KVServer) start(op Op) Err {
 	logIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
+		DPrintf("KVServer(%d) non-leader,", kv.me)
 		return ErrWrongLeader
 	}
 
 	done := make(chan raft.ApplyMsg, 1)
 	kv.mu.Lock()
-	// todo 如果index重复
-	kv.pendingReq[logIndex] = done
+	// 如果index重复 说明当前有分区了 自己不是leader
+	if _, ok := kv.pendingReq[logIndex]; ok {
+		kv.mu.Unlock()
+		DPrintf("logIndex duplicate, logIndex=%d", logIndex)
+		return ErrWrongLeader
+	} else {
+		kv.pendingReq[logIndex] = done
+	}
 	kv.mu.Unlock()
 
 	defer func() {
@@ -186,6 +201,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.exitCh = make(chan struct{})
 	kv.kvStore = make(map[string]string)
+	kv.pendingReq = make(map[int]chan raft.ApplyMsg)
 	go kv.run()
 	return kv
 }
