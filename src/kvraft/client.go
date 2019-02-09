@@ -3,9 +3,12 @@ package raftkv
 import (
 	"labrpc"
 	"sync"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
+
+const RetryInterval = 150 * time.Millisecond
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -48,17 +51,37 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	// You will have to modify this function.
+	ck.mu.Lock()
+	prefer := ck.lastSuccessServer
+	ck.mu.Unlock()
+
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = prefer
+		ck.mu.Unlock()
+	}()
+
+	offset := 0
 	args := GetArgs{
 		Key: key,
 	}
-	respCh := make(chan RespMsg)
-	ck.Call("KVServer.Get", args, respCh)
-
-	var resp RespMsg
-	select {
-	case resp = <-respCh:
-		return resp.msg
+	var reply GetReply
+	for {
+		id := (prefer + offset) % len(ck.servers)
+		if ck.servers[id].Call("KVServer.Get", args, &reply) {
+			// Get returns "" if the key does not exist.
+			if reply.Err == ErrNoKey {
+				prefer = id
+				return ""
+			}
+			if !reply.WrongLeader && len(reply.Err) == 0 {
+				prefer = id
+				return reply.Value
+			}
+		}
+		offset ++
+		time.Sleep(RetryInterval)
+		DPrintf("Clerk.Call fail: id=%d, need retry", id)
 	}
 }
 
@@ -73,66 +96,40 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	ck.mu.Lock()
+	prefer := ck.lastSuccessServer
+	ck.mu.Unlock()
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = prefer
+		ck.mu.Unlock()
+	}()
+
+	// keeps trying forever in the face of all other errors.
+	offset := 0
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,
 		Op:    op,
 	}
-
-	respCh := make(chan RespMsg)
-	ck.Call("KVServer.PutAppend", args, respCh)
-
-	var resp RespMsg
-	select {
-	case resp = <-respCh:
-		return
-	}
-}
-
-func (ck *Clerk) Call(method string, args interface{}, respCh chan RespMsg) {
-	ck.mu.Lock()
-	prefer := ck.lastSuccessServer
-	ck.mu.Unlock()
-	ret := ""
-
-	defer func() {
-		ck.mu.Lock()
-		ck.lastSuccessServer = prefer
-		ck.mu.Unlock()
-
-		respCh <- RespMsg{
-			msg: ret,
-		}
-	}()
-
-	// todo 可能异步同时多个重试好一些
-	// keeps trying forever in the face of all other errors.
-	offset := int64(prefer)
+	var reply PutAppendReply
 	for {
-		id := int(offset % int64(len(ck.servers)))
-		var reply GetReply
-		if ck.servers[id].Call(method, args, &reply) {
-			// Get returns "" if the key does not exist.
-			if method == "KVServer.Get" && reply.Err == ErrNoKey {
-				prefer = id
-				return
-			}
+		id := (prefer + offset) % len(ck.servers)
+		if ck.servers[id].Call("KVServer.PutAppend", args, &reply) {
 			if !reply.WrongLeader && len(reply.Err) == 0 {
 				prefer = id
-				ret = reply.Value
 				return
 			}
 		}
-
-		offset = nrand()
-
+		offset ++
+		time.Sleep(RetryInterval)
 		DPrintf("Clerk.Call fail: id=%d, need retry", id)
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OpTypePut)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OpTypeAppend)
 }

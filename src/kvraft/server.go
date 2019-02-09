@@ -1,14 +1,19 @@
 package raftkv
 
 import (
+	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
-const Debug = 0
+const (
+	Debug          = 1
+	RequestTimeOut = 1 * time.Second
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,11 +22,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType string
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
@@ -30,18 +37,109 @@ type KVServer struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 
-	maxraftstate int // snapshot if log grows this big
+	maxRaftState int // snapshot if log grows this big
 
-	// Your definitions here.
+	exitCh     chan struct{}
+	pendingReq map[int]chan<- raft.ApplyMsg // logIndex -> channel
+	kvStore    map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	err := kv.start(Op{
+		OpType: OpTypeGet,
+		Key:    args.Key,
+	})
+
+	if len(err) > 0 {
+		reply.Err = err
+		if err == ErrWrongLeader {
+			reply.WrongLeader = true
+		}
+		return
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if v, ok := kv.kvStore[args.Key]; ok {
+		reply.Value = v
+	} else {
+		reply.Err = ErrNoKey
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	err := kv.start(Op{
+		OpType: args.Op,
+		Key:    args.Key,
+		Value:  args.Value,
+	})
+
+	if len(err) > 0 {
+		reply.Err = err
+		if err == ErrWrongLeader {
+			reply.WrongLeader = true
+		}
+		return
+	}
+}
+
+func (kv *KVServer) start(op Op) Err {
+	logIndex, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		return ErrWrongLeader
+	}
+
+	done := make(chan raft.ApplyMsg, 1)
+	kv.mu.Lock()
+	// todo 如果index重复
+	kv.pendingReq[logIndex] = done
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.pendingReq, logIndex)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case <-done:
+		return OK
+	case <-time.After(RequestTimeOut):
+		return ErrTimeout
+	case <-kv.exitCh:
+		return ErrCrash
+	}
+}
+
+// handle applyMsg
+func (kv *KVServer) run() {
+	var applyMsg raft.ApplyMsg
+	for {
+		select {
+		case applyMsg = <-kv.applyCh:
+			DPrintf("KVServer(%d) receive applyMsg(%v)", kv.me, render.Render(applyMsg))
+			kv.mu.Lock()
+			// apply to local kv store
+			cmd := applyMsg.Command.(Op)
+			if cmd.OpType == OpTypePut {
+				kv.kvStore[cmd.Key] = cmd.Value
+			} else if cmd.OpType == OpTypeAppend {
+				if v, ok := kv.kvStore[cmd.Key]; ok {
+					kv.kvStore[cmd.Key] = v + cmd.Value
+				} else {
+					kv.kvStore[cmd.Key] = cmd.Value
+				}
+			}
+			if v, ok := kv.pendingReq[applyMsg.Index]; ok {
+				v <- applyMsg
+			}
+			kv.mu.Unlock()
+		case <-kv.exitCh:
+			return
+		}
+	}
 }
 
 //
@@ -53,6 +151,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.exitCh)
+	DPrintf("KVServer(%d) exit", kv.me)
 }
 
 //
@@ -69,21 +169,23 @@ func (kv *KVServer) Kill() {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxRaftState int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(GetArgs{})
+	labgob.Register(PutAppendArgs{})
 
 	kv := new(KVServer)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
+	kv.maxRaftState = maxRaftState
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-
+	kv.exitCh = make(chan struct{})
+	kv.kvStore = make(map[string]string)
+	go kv.run()
 	return kv
 }
