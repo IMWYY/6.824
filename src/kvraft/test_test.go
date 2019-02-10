@@ -104,7 +104,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
 		off := strings.Index(v, wanted)
 		if off < 0 {
-			t.Fatalf("%v missing element %v in Append result %v", clnt, wanted, v)
+			t.Fatalf("client %v missing element %v in Append result %v", clnt, wanted, v)
 		}
 		off1 := strings.LastIndex(v, wanted)
 		if off1 != off {
@@ -234,7 +234,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					// log.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key)
 					if v != last {
-						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						log.Fatalf("get wrong value, key %v, wanted:(%v), got(%v)", key, last, v)
 					}
 				}
 			}

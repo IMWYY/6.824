@@ -4,32 +4,25 @@ import (
 	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
 	"time"
 )
 
 const (
-	Debug          = 1
 	RequestTimeOut = 1 * time.Second
 )
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
+type Op struct {
+	OpType   string
+	Key      string
+	Value    string
+	ReqId    int64
+	ClientId int64
 }
 
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	OpType string
-	Key    string
-	Value  string
-	ReqId  int64
+type NotifyApplyMsg struct {
+	err Err
 }
 
 type KVServer struct {
@@ -40,27 +33,29 @@ type KVServer struct {
 
 	maxRaftState int // snapshot if log grows this big
 
-	exitCh     chan struct{}
-	pendingReq map[int]chan raft.ApplyMsg // logIndex -> channel
-	kvStore    map[string]string
+	exitCh         chan struct{}
+	pendingReq     map[int]chan NotifyApplyMsg // logIndex -> channel
+	kvStore        map[string]string
+	reqIdCache     map[int64]int64 // clientId -> reqId, provided that one client one rpc at a time
+	logIndex2ReqId map[int]int64   // logIndex -> reqId, use to detect leadership change
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
 	defer func() {
 		DPrintf("KVServer(%d).Get args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
 	}()
 
 	reply.Err = kv.start(Op{
-		OpType: OpTypeGet,
-		Key:    args.Key,
-		ReqId:  args.ReqId,
+		OpType:   OpTypeGet,
+		Key:      args.Key,
+		ReqId:    args.ReqId,
+		ClientId: args.ClientId,
 	})
 
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
+		return
 	}
-	return
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -72,27 +67,24 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	defer func() {
 		DPrintf("KVServer(%d).PutAppend args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
 	}()
 
 	reply.Err = kv.start(Op{
-		OpType: args.Op,
-		Key:    args.Key,
-		Value:  args.Value,
-		ReqId:  args.ReqId,
+		OpType:   args.Op,
+		Key:      args.Key,
+		Value:    args.Value,
+		ReqId:    args.ReqId,
+		ClientId: args.ClientId,
 	})
 
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
+		return
 	}
-	return
 }
 
-// One way to do this is for the server to detect that it has lost leadership,
-// by noticing that a different request has appeared at the index returned by Start(),
-// or that Raft's term has changed
 func (kv *KVServer) start(op Op) Err {
 	logIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
@@ -100,27 +92,23 @@ func (kv *KVServer) start(op Op) Err {
 		return ErrWrongLeader
 	}
 
-	done := make(chan raft.ApplyMsg, 1)
+	done := make(chan NotifyApplyMsg, 1)
 	kv.mu.Lock()
-	// 如果index重复 说明当前有分区了 自己不是leader
 	if _, ok := kv.pendingReq[logIndex]; ok {
 		kv.mu.Unlock()
-		DPrintf("logIndex duplicate, logIndex=%d", logIndex)
 		return ErrWrongLeader
 	} else {
 		kv.pendingReq[logIndex] = done
 	}
+	kv.logIndex2ReqId[logIndex] = op.ReqId
 	kv.mu.Unlock()
 
-	defer func() {
-		kv.mu.Lock()
-		delete(kv.pendingReq, logIndex)
-		kv.mu.Unlock()
-	}()
+	DPrintf("KVServer(%d) waiting ApplyMsg logIndex(%d), Op=%v", kv.me, logIndex, render.Render(op))
 
+	var msg NotifyApplyMsg
 	select {
-	case <-done:
-		return OK
+	case msg = <-done:
+		return msg.err
 	case <-time.After(RequestTimeOut):
 		return ErrTimeout
 	case <-kv.exitCh:
@@ -134,23 +122,36 @@ func (kv *KVServer) run() {
 	for {
 		select {
 		case applyMsg = <-kv.applyCh:
-			DPrintf("KVServer(%d) receive applyMsg(%v)", kv.me, render.Render(applyMsg))
 			kv.mu.Lock()
-			// apply to local kv store
 			cmd := applyMsg.Command.(Op)
-			if cmd.OpType == OpTypePut {
-				kv.kvStore[cmd.Key] = cmd.Value
-			} else if cmd.OpType == OpTypeAppend {
-				if v, ok := kv.kvStore[cmd.Key]; ok {
-					kv.kvStore[cmd.Key] = v + cmd.Value
-				} else {
+			if kv.reqIdCache[cmd.ClientId] < cmd.ReqId {
+				if cmd.OpType == OpTypePut {
 					kv.kvStore[cmd.Key] = cmd.Value
+				} else if cmd.OpType == OpTypeAppend {
+					if v, ok := kv.kvStore[cmd.Key]; ok {
+						kv.kvStore[cmd.Key] = v + cmd.Value
+					} else {
+						kv.kvStore[cmd.Key] = cmd.Value
+					}
 				}
+				kv.reqIdCache[cmd.ClientId] = cmd.ReqId
 			}
+
+			// to detect that it has lost leadership,
+			// 1. by noticing that a different request has appeared at the index returned by Start(),
+			// 2. or that Raft's term has changed
 			if v, ok := kv.pendingReq[applyMsg.Index]; ok {
-				v <- applyMsg
+				if kv.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
+					v <- NotifyApplyMsg{err: OK}
+				} else {
+					v <- NotifyApplyMsg{err: ErrWrongLeader}
+				}
+				delete(kv.logIndex2ReqId, applyMsg.Index)
+				delete(kv.pendingReq, applyMsg.Index)
 			}
 			kv.mu.Unlock()
+			DPrintf("KVServer(%d) apply key(%v), value(%v), logIndex(%d) receive applyMsg(%v)", kv.me, cmd.Key,
+				kv.kvStore[cmd.Key], applyMsg.Index, render.Render(applyMsg))
 		case <-kv.exitCh:
 			return
 		}
@@ -198,10 +199,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
 	kv.exitCh = make(chan struct{})
 	kv.kvStore = make(map[string]string)
-	kv.pendingReq = make(map[int]chan raft.ApplyMsg)
+	kv.reqIdCache = make(map[int64]int64)
+	kv.logIndex2ReqId = make(map[int]int64)
+	kv.pendingReq = make(map[int]chan NotifyApplyMsg)
 	go kv.run()
 	return kv
 }

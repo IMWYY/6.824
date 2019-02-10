@@ -17,6 +17,7 @@ type Clerk struct {
 
 	lastSuccessServer int
 	nextReqId         int64
+	clientId          int64
 
 	mu sync.Mutex
 }
@@ -36,8 +37,9 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.nextReqId = nrand()%1000001
+	ck.nextReqId = nrand() % 100000001
 	ck.lastSuccessServer = 0
+	ck.clientId = nrand()
 
 	return ck
 }
@@ -71,6 +73,7 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
 		Key:   key,
 		ReqId: reqId,
+		ClientId: ck.clientId,
 	}
 	for {
 		id := (prefer + offset) % len(ck.servers)
@@ -89,7 +92,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 		offset ++
 		time.Sleep(RetryInterval)
-		DPrintf("Clerk.Get fail: svcId=%d, need retry", id)
+		DPrintf("--- Clerk.Get fail: svcId=%d, need retry", id)
 	}
 }
 
@@ -118,10 +121,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// keeps trying forever in the face of all other errors.
 	offset := 0
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
-		ReqId: reqId,
+		Key:      key,
+		Value:    value,
+		Op:       op,
+		ReqId:    reqId,
+		ClientId: ck.clientId,
 	}
 
 	DPrintf("Clerk.PutAppend args=%v", render.Render(args))
@@ -138,7 +142,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		offset ++
 		time.Sleep(RetryInterval)
-		DPrintf("Clerk.PutAppend fail: id=%d, need retry", id)
+		DPrintf("--- Clerk.PutAppend fail: id=%d, need retry", id)
 	}
 }
 
