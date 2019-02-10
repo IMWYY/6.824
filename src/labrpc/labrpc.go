@@ -50,7 +50,6 @@ package labrpc
 //
 
 import (
-	"fmt"
 	"labgob"
 )
 import "bytes"
@@ -100,7 +99,6 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	case e.ch <- req:
 		// ok
 	case <-e.done:
-		fmt.Printf("netword is done")
 		return false
 	}
 
@@ -113,7 +111,6 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		}
 		return true
 	} else {
-		fmt.Printf("reply is not ok")
 		return false
 	}
 }
