@@ -31,7 +31,7 @@ const (
 	Candidate
 	Follower
 
-	HeartbeatInterval    = 125 * time.Millisecond
+	HeartbeatInterval    = 120 * time.Millisecond
 	ElectionTimeoutBase  = 300
 	ElectionTimeoutDelta = 151
 	VoteNull             = -1
@@ -217,6 +217,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			LogIndex: index,
 		})
 		rf.persist()
+
+		// this is an optional optimization. broadcast logs once receive cmd
 		//go rf.broadcastAppendEntries()
 	}
 	return index, term, isLeader
@@ -490,11 +492,13 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 				DPrintf("Raft(%d) chanCommit  lock enter", rf.me)
 				baseIndex := rf.log[0].LogIndex
 				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-					applyCh <- ApplyMsg{
-						Index:   i,
-						Command: rf.log[i-baseIndex].LogCmd,
-					}
-					rf.lastApplied = i
+					//if i-baseIndex >= 1 && i-baseIndex < len(rf.log) {
+						applyCh <- ApplyMsg{
+							Index:   i,
+							Command: rf.log[i-baseIndex].LogCmd,
+						}
+						rf.lastApplied = i
+					//}
 				}
 				rf.mu.Unlock()
 				DPrintf("Raft(%d) chanCommit lock leave", rf.me)

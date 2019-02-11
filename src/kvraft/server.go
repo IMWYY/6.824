@@ -148,6 +148,8 @@ func (kv *KVServer) run() {
 					panic("god decode error")
 				}
 
+				// todo need to replay logs
+
 				DPrintf("KVServer(%d) includedIndex(%d) includedTerm(%d) restore snapshot", kv.me, includedIndex, includedTerm)
 			} else {
 				cmd := applyMsg.Command.(Op)

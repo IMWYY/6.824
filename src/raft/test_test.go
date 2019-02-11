@@ -440,7 +440,7 @@ loop:
 			// leader moved on really quickly
 			continue
 		}
-		cmds := []int{}
+		var cmds []int
 		for i := 1; i < iters+2; i++ {
 			x := int(rand.Int31())
 			cmds = append(cmds, x)

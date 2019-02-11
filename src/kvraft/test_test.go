@@ -1,8 +1,6 @@
 package raftkv
 
 import (
-	"bytes"
-	"labgob"
 	"linearizability"
 )
 
@@ -14,29 +12,6 @@ import "log"
 import "strings"
 import "sync"
 import "sync/atomic"
-
-func TestGob(t *testing.T)  {
-	args1 := &GetArgs{
-		Key:"11111",
-	}
-	args2 := &PutAppendArgs{
-		Key:"222222",
-	}
-	var b bytes.Buffer
-	enc := labgob.NewEncoder(&b)
-	enc.Encode(args1)
-	enc.Encode(args2)
-
-	data := b.Bytes()
-	t.Logf("encoded=%v", data)
-
-	var getArgs GetArgs
-	dec := labgob.NewDecoder(bytes.NewBuffer(data))
-	dec.Decode(&getArgs)
-
-	t.Logf("decoded=%v", getArgs)
-
-}
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
