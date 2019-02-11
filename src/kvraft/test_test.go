@@ -16,12 +16,16 @@ import "sync"
 import "sync/atomic"
 
 func TestGob(t *testing.T)  {
-	args := &GetArgs{
+	args1 := &GetArgs{
 		Key:"11111",
+	}
+	args2 := &PutAppendArgs{
+		Key:"222222",
 	}
 	var b bytes.Buffer
 	enc := labgob.NewEncoder(&b)
-	enc.Encode(args)
+	enc.Encode(args1)
+	enc.Encode(args2)
 
 	data := b.Bytes()
 	t.Logf("encoded=%v", data)
@@ -689,6 +693,7 @@ func TestSnapshotSize3B(t *testing.T) {
 		check(cfg, t, ck, "x", "0")
 		Put(cfg, ck, "x", "1")
 		check(cfg, t, ck, "x", "1")
+		log.Printf("TestSnapshotSize3B itertor(%d)", i)
 	}
 
 	// check that servers have thrown away most of their log entries

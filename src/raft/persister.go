@@ -57,13 +57,6 @@ func (ps *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
 	ps.snapshot = snapshot
 }
 
-// todo use SaveStateAndSnapshot instead
-func (ps *Persister) SaveSnapshot(snapshot []byte) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	ps.snapshot = snapshot
-}
-
 func (ps *Persister) ReadSnapshot() []byte {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()

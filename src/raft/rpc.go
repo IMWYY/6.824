@@ -68,7 +68,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		uptoDate = true
 	}
 	if (rf.votedFor == VoteNull || rf.votedFor == args.CandidateId) && uptoDate {
-		rf.chanGrantVote <- true
+		rf.chanGrantVote <- struct{}{}
 		rf.state = Follower
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
@@ -104,7 +104,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		return
 	}
 
-	rf.chanHeartbeat <- true
+	rf.chanHeartbeat <- struct{}{}
 	// 0. If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -153,7 +153,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = intMin(args.LeaderCommit, rf.getLastIndex())
-		rf.chanCommit <- true
+		rf.chanCommit <- struct{}{}
 	}
 
 	return
@@ -175,27 +175,44 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	reply.Term = rf.currentTerm
 	// 1. Reply immediately if term < currentTerm
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
 		return
 	}
-	rf.chanHeartbeat <- true
+	rf.chanHeartbeat <- struct{}{}
 	rf.state = Follower
 
-	rf.persister.SaveSnapshot(args.Data)
-
+	// save raft state and snapshot
+	rf.persister.SaveStateAndSnapshot(rf.getPersistData(), args.Data)
 	rf.log = truncateLog(args.LastIncludedIndex, args.LastIncludedTerm, rf.log)
-
-	msg := ApplyMsg{
-		UseSnapshot: true,
-		Snapshot:    args.Data,
-	}
-
 	rf.lastApplied = args.LastIncludedIndex
 	rf.commitIndex = args.LastIncludedIndex
 
-	rf.persist()
+	rf.chanApply <- ApplyMsg{
+		UseSnapshot: true,
+		Snapshot:    args.Data,
+	}
+}
 
-	rf.chanApply <- msg
+// 只保存 lastIncludedIndex 和 lastIncludedTerm 匹配的日志之后的日志
+// 这里用log[0]保存 lastIncludedIndex 和 lastIncludedTerm
+func truncateLog(lastIncludedIndex int, lastIncludedTerm int, logs []LogEntry) []LogEntry {
+	var newLogEntries []LogEntry
+	newLogEntries = append(newLogEntries, LogEntry{
+		LogIndex: lastIncludedIndex,
+		LogTerm:  lastIncludedTerm,
+	})
+
+	for index := len(logs) - 1; index >= 0; index-- {
+		if logs[index].LogIndex == lastIncludedIndex && logs[index].LogTerm == lastIncludedTerm {
+			newLogEntries = append(newLogEntries, logs[index+1:]...)
+			break
+		}
+	}
+	//baseIndex := logs[0].LogIndex
+	//for i := lastIncludedIndex + 1; i <= logs[len(logs)-1].LogIndex; i++ {
+	//	newLogEntries = append(newLogEntries, logs[i-baseIndex])
+	//}
+	return newLogEntries
 }

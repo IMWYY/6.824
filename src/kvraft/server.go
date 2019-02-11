@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
@@ -32,6 +33,7 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 
 	maxRaftState int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	exitCh         chan struct{}
 	pendingReq     map[int]chan NotifyApplyMsg // logIndex -> channel
@@ -41,8 +43,10 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	s := time.Now()
 	defer func() {
-		DPrintf("KVServer(%d).Get args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
+		DPrintf("KVServer(%d).Get latency=%v, args=%v, reply=%v", kv.me, time.Since(s).Nanoseconds()/1e6,
+			render.Render(args), render.Render(reply))
 	}()
 
 	reply.Err = kv.start(Op{
@@ -56,6 +60,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.WrongLeader = true
 		return
 	}
+	if reply.Err != OK {
+		return
+	}
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -67,8 +74,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	s := time.Now()
 	defer func() {
-		DPrintf("KVServer(%d).PutAppend args=%v, reply=%v", kv.me, render.Render(args), render.Render(reply))
+		DPrintf("KVServer(%d).PutAppend latency=%v args=%v, reply=%v", kv.me, time.Since(s).Nanoseconds()/1e6,
+			render.Render(args), render.Render(reply))
 	}()
 
 	reply.Err = kv.start(Op{
@@ -123,35 +132,71 @@ func (kv *KVServer) run() {
 		select {
 		case applyMsg = <-kv.applyCh:
 			kv.mu.Lock()
-			cmd := applyMsg.Command.(Op)
-			if kv.reqIdCache[cmd.ClientId] < cmd.ReqId {
-				if cmd.OpType == OpTypePut {
-					kv.kvStore[cmd.Key] = cmd.Value
-				} else if cmd.OpType == OpTypeAppend {
-					if v, ok := kv.kvStore[cmd.Key]; ok {
-						kv.kvStore[cmd.Key] = v + cmd.Value
-					} else {
-						kv.kvStore[cmd.Key] = cmd.Value
-					}
-				}
-				kv.reqIdCache[cmd.ClientId] = cmd.ReqId
-			}
 
-			// to detect that it has lost leadership,
-			// 1. by noticing that a different request has appeared at the index returned by Start(),
-			// 2. or that Raft's term has changed
-			if v, ok := kv.pendingReq[applyMsg.Index]; ok {
-				if kv.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
-					v <- NotifyApplyMsg{err: OK}
-				} else {
-					v <- NotifyApplyMsg{err: ErrWrongLeader}
+			if applyMsg.UseSnapshot {
+				// handle snapshot 返回的snapshot的data会包含raft log的info
+				var includedIndex, includedTerm int
+				dec := labgob.NewDecoder(bytes.NewBuffer(applyMsg.Snapshot))
+				kv.kvStore = make(map[string]string)
+				kv.reqIdCache = make(map[int64]int64)
+				kv.logIndex2ReqId = make(map[int]int64)
+				if dec.Decode(&includedIndex) != nil ||
+					dec.Decode(&includedTerm) != nil ||
+					dec.Decode(&kv.kvStore) != nil ||
+					dec.Decode(&kv.reqIdCache) != nil ||
+					dec.Decode(&kv.logIndex2ReqId) != nil {
+					panic("god decode error")
 				}
-				delete(kv.logIndex2ReqId, applyMsg.Index)
-				delete(kv.pendingReq, applyMsg.Index)
+
+				DPrintf("KVServer(%d) includedIndex(%d) includedTerm(%d) restore snapshot", kv.me, includedIndex, includedTerm)
+			} else {
+				cmd := applyMsg.Command.(Op)
+
+				// 1. apply log message and deduplicate
+				if kv.reqIdCache[cmd.ClientId] < cmd.ReqId {
+					if cmd.OpType == OpTypePut {
+						kv.kvStore[cmd.Key] = cmd.Value
+					} else if cmd.OpType == OpTypeAppend {
+						if v, ok := kv.kvStore[cmd.Key]; ok {
+							kv.kvStore[cmd.Key] = v + cmd.Value
+						} else {
+							kv.kvStore[cmd.Key] = cmd.Value
+						}
+					}
+					kv.reqIdCache[cmd.ClientId] = cmd.ReqId
+				}
+
+				// 2. return rpc request
+				// to detect that it has lost leadership,
+				// 	a. by noticing that a different request has appeared at the index returned by Start(),
+				// 	b. or that Raft's term has changed
+				if v, ok := kv.pendingReq[applyMsg.Index]; ok {
+					if kv.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
+						v <- NotifyApplyMsg{err: OK}
+					} else {
+						v <- NotifyApplyMsg{err: ErrWrongLeader}
+					}
+					delete(kv.logIndex2ReqId, applyMsg.Index)
+					delete(kv.pendingReq, applyMsg.Index)
+				}
+
+				// 3. snapshot if size more than a fixed size
+				if kv.maxRaftState > 0 && kv.persister.RaftStateSize() > kv.maxRaftState {
+					var b bytes.Buffer
+					enc := labgob.NewEncoder(&b)
+					enc.Encode(kv.kvStore)
+					enc.Encode(kv.reqIdCache)
+					enc.Encode(kv.logIndex2ReqId)
+					// 这里一定要用goroutine 否则会产生死锁
+					// 死锁条件：applyMsg生产时会先获取锁, 消费时又去获取锁，导致chan不能被消费，从而导致生产被阻塞
+					go kv.rf.StartSnapshot(b.Bytes(), applyMsg.Index)
+					DPrintf("KVServer(%d) logIndex(%d) reach maxRaftState, need snapshot", kv.me, applyMsg.Index)
+				}
+
+				DPrintf("KVServer(%d) apply key(%v), value(%v), logIndex(%d) receive applyMsg(%v)", kv.me, cmd.Key,
+					kv.kvStore[cmd.Key], applyMsg.Index, render.Render(applyMsg))
 			}
 			kv.mu.Unlock()
-			DPrintf("KVServer(%d) apply key(%v), value(%v), logIndex(%d) receive applyMsg(%v)", kv.me, cmd.Key,
-				kv.kvStore[cmd.Key], applyMsg.Index, render.Render(applyMsg))
 		case <-kv.exitCh:
 			return
 		}
@@ -195,6 +240,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxRaftState = maxRaftState
+	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

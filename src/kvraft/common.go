@@ -13,7 +13,7 @@ const (
 	OpTypePut    = "Put"
 	OpTypeAppend = "Append"
 
-	Debug = 0
+	Debug = 1
 )
 
 type Err string

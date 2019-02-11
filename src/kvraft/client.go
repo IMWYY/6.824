@@ -37,7 +37,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.nextReqId = nrand() % 100000001
+	ck.nextReqId = nrand() % 10000000001
 	ck.lastSuccessServer = 0
 	ck.clientId = nrand()
 
@@ -71,8 +71,8 @@ func (ck *Clerk) Get(key string) string {
 
 	offset := 0
 	args := GetArgs{
-		Key:   key,
-		ReqId: reqId,
+		Key:      key,
+		ReqId:    reqId,
 		ClientId: ck.clientId,
 	}
 	for {
@@ -88,7 +88,7 @@ func (ck *Clerk) Get(key string) string {
 				prefer = id
 				return reply.Value
 			}
-			DPrintf("Clerk.Get rpc return false: svcId=%d", id)
+			DPrintf("--- Clerk.Get rpc return false: svcId=%d", id)
 		}
 		offset ++
 		time.Sleep(RetryInterval)
@@ -128,13 +128,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId: ck.clientId,
 	}
 
-	DPrintf("Clerk.PutAppend args=%v", render.Render(args))
+	DPrintf("--- Clerk.PutAppend args=%v", render.Render(args))
 
 	for {
 		id := (prefer + offset) % len(ck.servers)
 		var reply PutAppendReply
 		if ck.servers[id].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("Clerk.PutAppend rpc return: svcId=%d, args=%v, reply=%v", id, render.Render(args), render.Render(reply))
+			DPrintf("--- Clerk.PutAppend rpc return: svcId=%d, args=%v, reply=%v", id, render.Render(args), render.Render(reply))
 			if !reply.WrongLeader && (len(reply.Err) == 0 || reply.Err == OK) {
 				prefer = id
 				return
@@ -142,7 +142,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		offset ++
 		time.Sleep(RetryInterval)
-		DPrintf("--- Clerk.PutAppend fail: id=%d, need retry", id)
+		DPrintf("--- Clerk.PutAppend fail: serverId(%d), clientId(%d), reqId(%d) need retry", id, ck.clientId, reqId)
 	}
 }
 
