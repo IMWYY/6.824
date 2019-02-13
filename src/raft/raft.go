@@ -19,6 +19,7 @@ package raft
 
 import (
 	"bytes"
+	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
 	"math/rand"
@@ -330,7 +331,8 @@ func (rf *Raft) broadcastAppendEntries() {
 					DPrintf("Raft(%d) to (%d) sendAppendEntries lock before", rf.me, index)
 					rf.mu.Lock()
 					DPrintf("Raft(%d) to (%d) sendAppendEntries  lock enter", rf.me, index)
-					defer DPrintf("Raft(%d) to (%d) sendAppendEntries lock leave", rf.me, index)
+					defer DPrintf("Raft(%d) to (%d) sendAppendEntries lock leave, arg=%v, reply=%v", rf.me, index,
+						render.Render(args), render.Render(reply))
 					defer rf.mu.Unlock()
 					if ok {
 						if rf.state != Leader || req.Term != rf.currentTerm {
@@ -489,7 +491,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			case <-rf.chanCommit:
 				DPrintf("Raft(%d) chanCommit lock before", rf.me)
 				rf.mu.Lock()
-				DPrintf("Raft(%d) chanCommit  lock enter", rf.me)
+				DPrintf("Raft(%d) chanCommit lock enter", rf.me)
 				baseIndex := rf.log[0].LogIndex
 				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 					//if i-baseIndex >= 1 && i-baseIndex < len(rf.log) {
