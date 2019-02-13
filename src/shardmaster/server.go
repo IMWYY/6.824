@@ -1,7 +1,6 @@
 package shardmaster
 
 import (
-	"fmt"
 	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
@@ -141,10 +140,14 @@ func (sm *ShardMaster) run() {
 		select {
 		case applyMsg = <-sm.applyCh:
 			sm.mu.Lock()
+
 			if applyMsg.UseSnapshot {
-				DPrintf("ShardMaster(%d)restore snapshot", sm.me)
+				DPrintf("ShardMaster(%d) restore snapshot", sm.me)
 			} else {
-				cmd := applyMsg.Command.(Op)
+				cmd,ok := applyMsg.Command.(Op)
+				if !ok {
+					DPrintf("ShardMaster(%d) receive WRONG message=%v", sm.me, applyMsg)
+				}
 
 				// 1. apply log message and deduplicate
 				if sm.reqIdCache[cmd.ClientId] < cmd.ReqId {
@@ -174,8 +177,8 @@ func (sm *ShardMaster) run() {
 						if _, ok := newConf.Groups[args.GID]; !ok || args.Shard < 0 || args.Shard >= NShards {
 							panic("invalid MoveArgs")
 						}
-						newConf.Shards[args.GID] = args.Shard
-						sm.rebalanceConfig(newConf)
+						newConf.Shards[args.Shard] = args.GID
+						sm.configs = append(sm.configs, *newConf)
 					}
 					sm.reqIdCache[cmd.ClientId] = cmd.ReqId
 				}
@@ -233,15 +236,14 @@ func (sm *ShardMaster) rebalanceConfig(newConf *Config) {
 		sm.configs = append(sm.configs, *newConf)
 	}()
 
-	newAvg := NShards / len(newConf.Groups)
-	if newAvg == 0 {
-		 newAvg = 1
+	if len(newConf.Groups) == 0 {
+		return
 	}
 
-	// gid->shardsIndex and sort desc
+	// gid->shardsIndex and sort
 	gid2shardsIndex := map[int][]int{}
 	// 还没有被分配的shards
-	emptyShards := Pair{
+	waitAllocShards := Pair{
 		gid:    0,
 		shards: []int{},
 	}
@@ -252,7 +254,7 @@ func (sm *ShardMaster) rebalanceConfig(newConf *Config) {
 	for k, v := range newConf.Shards {
 		// gid=0 该shard还没被分配 要优先分配
 		if v == 0 {
-			emptyShards.shards = append(emptyShards.shards, k)
+			waitAllocShards.shards = append(waitAllocShards.shards, k)
 			continue
 		}
 		if _, ok := gid2shardsIndex[v]; ok {
@@ -262,46 +264,64 @@ func (sm *ShardMaster) rebalanceConfig(newConf *Config) {
 		}
 	}
 	ascPairs := sortMap(gid2shardsIndex, false)
-	// 把没被分配shards的放到最后 优先被分配
-	if len(emptyShards.shards) > 0 {
-		ascPairs = append(ascPairs, emptyShards)
+
+	min := NShards / len(newConf.Groups)
+	max := min + 1
+	if min == 0 || len(newConf.Groups) == NShards {
+		min, max = 1, 1
 	}
 
-	fmt.Printf("ascPairs: %v \n", ascPairs)
+	DPrintf("ShardMaster(%d) min(%d), max(%d), ascPairs=%v waitAllocShards=%v", sm.me, min, max, ascPairs, waitAllocShards)
 
-	descIndex, ascIndex := len(ascPairs)-1, 0
-	for {
-		low := ascPairs[ascIndex]
-		if len(low.shards) >= newAvg || ascIndex == descIndex {
-			return
-		}
-		high := ascPairs[descIndex]
-
-		// 把分配的shards数量高于avg的 分配给低于avg的group
-		l := len(high.shards) - newAvg
-		if high.gid == 0 {
-			l = len(high.shards)
-		}
-		for i := 0; i < l; i++ {
-			low.shards = append(low.shards, high.shards[i])
-			newConf.Shards[high.shards[i]] = low.gid
-			if len(low.shards) == newAvg {
-				// 对于所有的0需要分配完 允许比newAvg大1
-				if high.gid == 0 && ascIndex == descIndex-1 {
-					continue
+	// after leave operation
+	index := 0
+	for len(waitAllocShards.shards) > 0 {
+		for _, v := range ascPairs {
+			if len(v.shards) < min {
+				for len(v.shards) < min {
+					v.shards = append(v.shards, waitAllocShards.shards[index])
+					newConf.Shards[waitAllocShards.shards[index]] = v.gid
+					index ++
+					if index == len(waitAllocShards.shards) {
+						return
+					}
 				}
-				ascIndex ++
-				if ascIndex == descIndex {
-					return
-				}
-				low = ascPairs[ascIndex]
-				if len(low.shards) >= newAvg {
+			} else if len(v.shards) < max {
+				v.shards = append(v.shards, waitAllocShards.shards[index])
+				newConf.Shards[waitAllocShards.shards[index]] = v.gid
+				index ++
+				if index == len(waitAllocShards.shards) {
 					return
 				}
 			}
 		}
+	}
 
-		descIndex --
+	// after add operation
+	low, high := 0, len(ascPairs)-1
+	for {
+		small := ascPairs[low]
+		if len(small.shards) >= min || low == high {
+			return
+		}
+		big := ascPairs[high]
+		// 把分配的shards数量高于avg的 分配给低于avg的group
+		for i := len(big.shards) - 1; i >= min; i-- {
+			small.shards = append(small.shards, big.shards[i])
+			newConf.Shards[big.shards[i]] = small.gid
+			big.shards = big.shards[:i]
+			if len(small.shards) == min {
+				low ++
+				if low == high {
+					return
+				}
+				small = ascPairs[low]
+				if len(small.shards) >= min {
+					return
+				}
+			}
+		}
+		high --
 	}
 }
 
@@ -334,6 +354,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.configs[0].Groups = map[int][]string{}
 
 	labgob.Register(Op{})
+	labgob.Register(QueryArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(JoinArgs{})
+	labgob.Register(LeaveArgs{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 

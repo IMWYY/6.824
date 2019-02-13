@@ -192,7 +192,7 @@ func TestBasic(t *testing.T) {
 		gids[xi] = int((xi * 10) + 100)
 		go func(i int) {
 			defer func() { ch <- true }()
-			var gid int = gids[i]
+			var gid = gids[i]
 			var sid1 = fmt.Sprintf("s%da", gid)
 			var sid2 = fmt.Sprintf("s%db", gid)
 			cka[i].Join(map[int][]string{gid + 1000: {sid1}})
