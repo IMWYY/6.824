@@ -144,11 +144,7 @@ func (sm *ShardMaster) run() {
 			if applyMsg.UseSnapshot {
 				DPrintf("ShardMaster(%d) restore snapshot", sm.me)
 			} else {
-				cmd,ok := applyMsg.Command.(Op)
-				if !ok {
-					DPrintf("ShardMaster(%d) receive WRONG message=%v", sm.me, applyMsg)
-				}
-
+				cmd := applyMsg.Command.(Op)
 				// 1. apply log message and deduplicate
 				if sm.reqIdCache[cmd.ClientId] < cmd.ReqId {
 
