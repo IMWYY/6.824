@@ -4,14 +4,23 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "labrpc"
+import (
+	"labrpc"
+	"sync"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
 
+const RetryInterval = 100 * time.Millisecond
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// Your data here.
+	clientId          int64
+	nextReqId         int64
+	lastSuccessServer int
+
+	mu sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,77 +34,117 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
+	ck.nextReqId = nrand() % 10000000001
+	ck.lastSuccessServer = 0
 	return ck
 }
 
+func (ck *Clerk) getReqBase() (int, int64) {
+	ck.mu.Lock()
+	defer func() {
+		ck.nextReqId ++
+		ck.mu.Unlock()
+	}()
+	return ck.lastSuccessServer, ck.nextReqId
+}
+
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	offset, reqId := ck.getReqBase()
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = offset
+		ck.mu.Unlock()
+	}()
+
+	args := &QueryArgs{
+		Num:   num,
+		ReqId: reqId,
+		ClientId: ck.clientId,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
-			}
+		id := offset % len(ck.servers)
+		var reply QueryReply
+		ok := ck.servers[id].Call("ShardMaster.Query", args, &reply)
+		if ok && !reply.WrongLeader && (reply.Err == OK || len(reply.Err) == 0) {
+			return reply.Config
 		}
-		time.Sleep(100 * time.Millisecond)
+		offset ++
+		time.Sleep(RetryInterval)
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
+	offset, reqId := ck.getReqBase()
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = offset
+		ck.mu.Unlock()
+	}()
 
+	args := &JoinArgs{
+		Servers: servers,
+		ReqId:   reqId,
+		ClientId: ck.clientId,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardMaster.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		id := offset % len(ck.servers)
+		var reply JoinReply
+		ok := ck.servers[id].Call("ShardMaster.Join", args, &reply)
+		if ok && !reply.WrongLeader && (reply.Err == OK || len(reply.Err) == 0) {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		offset ++
+		time.Sleep(RetryInterval)
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
+	offset, reqId := ck.getReqBase()
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = offset
+		ck.mu.Unlock()
+	}()
+	args := &LeaveArgs{
+		GIDs:  gids,
+		ReqId: reqId,
+		ClientId: ck.clientId,
+	}
 
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardMaster.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		id := offset % len(ck.servers)
+		var reply LeaveReply
+		ok := ck.servers[id].Call("ShardMaster.Leave", args, &reply)
+		if ok && !reply.WrongLeader && (reply.Err == OK || len(reply.Err) == 0) {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		offset ++
+		time.Sleep(RetryInterval)
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
+	offset, reqId := ck.getReqBase()
+	defer func() {
+		ck.mu.Lock()
+		ck.lastSuccessServer = offset
+		ck.mu.Unlock()
+	}()
+	args := &MoveArgs{
+		Shard:    shard,
+		GID:      gid,
+		ReqId:    reqId,
+		ClientId: ck.clientId,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardMaster.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		id := offset % len(ck.servers)
+		var reply MoveReply
+		ok := ck.servers[id].Call("ShardMaster.Move", args, &reply)
+		if ok && !reply.WrongLeader && (reply.Err == OK || len(reply.Err) == 0) {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		offset ++
+		time.Sleep(RetryInterval)
 	}
 }

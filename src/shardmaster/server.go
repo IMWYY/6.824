@@ -1,11 +1,17 @@
 package shardmaster
 
+import (
+	"fmt"
+	"github.com/luci/go-render/render"
+	"labgob"
+	"labrpc"
+	"raft"
+	"sort"
+	"sync"
+	"time"
+)
 
-import "raft"
-import "labrpc"
-import "sync"
-import "labgob"
-
+const RequestTimeOut = 1 * time.Second
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -13,33 +19,104 @@ type ShardMaster struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 
-	// Your data here.
-
-	configs []Config // indexed by config num
+	configs        []Config // indexed by config num
+	exitCh         chan struct{}
+	pendingReq     map[int]chan NotifyApplyMsg // logIndex -> channel
+	reqIdCache     map[int64]int64             // clientId -> reqId, provided that one client one rpc at a time
+	logIndex2ReqId map[int]int64               // logIndex -> reqId, use to detect leadership change
 }
 
+type NotifyApplyMsg struct {
+	err Err
+}
 
 type Op struct {
-	// Your data here.
+	ReqId    int64
+	ClientId int64
+	OpType   string
+	Args     interface{}
 }
-
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeJoin, *args)
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
+		return
+	}
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeLeave, *args)
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
+		return
+	}
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeMove, *args)
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
+		return
+	}
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeQuery, *args)
+	if reply.Err == ErrWrongLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if args.Num == -1 || args.Num >= len(sm.configs) {
+		reply.Config = sm.configs[len(sm.configs)-1]
+	} else {
+		reply.Config = sm.configs[args.Num]
+	}
 }
 
+func (sm *ShardMaster) start(clientId, reqId int64, opType string, args interface{}) Err {
+	op := Op{
+		ReqId:    reqId,
+		ClientId: clientId,
+		OpType:   opType,
+		Args:     args,
+	}
+	logIndex, _, isLeader := sm.rf.Start(op)
+	if !isLeader {
+		DPrintf("ShardMaster(%d) non-leader,", sm.me)
+		return ErrWrongLeader
+	}
+
+	done := make(chan NotifyApplyMsg, 1)
+	sm.mu.Lock()
+	if _, ok := sm.pendingReq[logIndex]; ok {
+		sm.mu.Unlock()
+		return ErrWrongLeader
+	} else {
+		sm.pendingReq[logIndex] = done
+	}
+	sm.logIndex2ReqId[logIndex] = op.ReqId
+	sm.mu.Unlock()
+
+	DPrintf("ShardMaster(%d) waiting ApplyMsg logIndex(%d), Op=%v", sm.me, logIndex, render.Render(op))
+
+	var msg NotifyApplyMsg
+	select {
+	case msg = <-done:
+		return msg.err
+	case <-time.After(RequestTimeOut):
+		return ErrTimeout
+	case <-sm.exitCh:
+		return ErrCrash
+	}
+}
 
 //
 // the tester calls Kill() when a ShardMaster instance won't
@@ -49,12 +126,198 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 //
 func (sm *ShardMaster) Kill() {
 	sm.rf.Kill()
-	// Your code here, if desired.
+	close(sm.exitCh)
+	DPrintf("ShardMaster(%d) exit", sm.me)
 }
 
 // needed by shardkv tester
 func (sm *ShardMaster) Raft() *raft.Raft {
 	return sm.rf
+}
+
+func (sm *ShardMaster) run() {
+	var applyMsg raft.ApplyMsg
+	for {
+		select {
+		case applyMsg = <-sm.applyCh:
+			sm.mu.Lock()
+			if applyMsg.UseSnapshot {
+				DPrintf("ShardMaster(%d)restore snapshot", sm.me)
+			} else {
+				cmd := applyMsg.Command.(Op)
+
+				// 1. apply log message and deduplicate
+				if sm.reqIdCache[cmd.ClientId] < cmd.ReqId {
+
+					if cmd.OpType == OpTypeJoin {
+						args := cmd.Args.(JoinArgs)
+						newConf := sm.nextNewConfig()
+						for k, v := range args.Servers {
+							newConf.Groups[k] = v
+						}
+						sm.rebalanceConfig(newConf)
+					} else if cmd.OpType == OpTypeLeave {
+						args := cmd.Args.(LeaveArgs)
+						newConf := sm.nextNewConfig()
+						for _, v := range args.GIDs {
+							delete(newConf.Groups, v)
+							for i := 0; i < len(newConf.Shards); i++ {
+								if newConf.Shards[i] == v {
+									newConf.Shards[i] = 0
+								}
+							}
+						}
+						sm.rebalanceConfig(newConf)
+					} else if cmd.OpType == OpTypeMove {
+						args := cmd.Args.(MoveArgs)
+						newConf := sm.nextNewConfig()
+						if _, ok := newConf.Groups[args.GID]; !ok || args.Shard < 0 || args.Shard >= NShards {
+							panic("invalid MoveArgs")
+						}
+						newConf.Shards[args.GID] = args.Shard
+						sm.rebalanceConfig(newConf)
+					}
+					sm.reqIdCache[cmd.ClientId] = cmd.ReqId
+				}
+
+				// 2. return rpc request
+				// to detect that it has lost leadership,
+				// 	a. by noticing that a different request has appeared at the index returned by Start(),
+				// 	b. or that Raft's term has changed
+				if v, ok := sm.pendingReq[applyMsg.Index]; ok {
+					if sm.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
+						v <- NotifyApplyMsg{err: OK}
+					} else {
+						v <- NotifyApplyMsg{err: ErrWrongLeader}
+					}
+					delete(sm.logIndex2ReqId, applyMsg.Index)
+					delete(sm.pendingReq, applyMsg.Index)
+				}
+				DPrintf("ShardMaster(%d) logIndex(%d) receive applyMsg(%v)", sm.me, applyMsg.Index, render.Render(applyMsg))
+			}
+			sm.mu.Unlock()
+		case <-sm.exitCh:
+			return
+		}
+	}
+
+}
+
+type Pair struct {
+	gid    int
+	shards []int
+}
+
+func sortMap(m map[int][]int, desc bool) []Pair {
+	if len(m) == 0 {
+		return []Pair{}
+	}
+	pairs := make([]Pair, len(m))
+	i := 0
+	for k, v := range m {
+		pairs[i] = Pair{k, v}
+		i ++
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if desc {
+			return len(pairs[i].shards) > len(pairs[j].shards)
+		} else {
+			return len(pairs[i].shards) < len(pairs[j].shards)
+		}
+	})
+	return pairs
+}
+
+func (sm *ShardMaster) rebalanceConfig(newConf *Config) {
+	defer func() {
+		sm.configs = append(sm.configs, *newConf)
+	}()
+
+	newAvg := NShards / len(newConf.Groups)
+	if newAvg == 0 {
+		 newAvg = 1
+	}
+
+	// gid->shardsIndex and sort desc
+	gid2shardsIndex := map[int][]int{}
+	// 还没有被分配的shards
+	emptyShards := Pair{
+		gid:    0,
+		shards: []int{},
+	}
+	// 所有还没被分配过的group对应的shards都会被初始化为0
+	for k := range newConf.Groups {
+		gid2shardsIndex[k] = []int{}
+	}
+	for k, v := range newConf.Shards {
+		// gid=0 该shard还没被分配 要优先分配
+		if v == 0 {
+			emptyShards.shards = append(emptyShards.shards, k)
+			continue
+		}
+		if _, ok := gid2shardsIndex[v]; ok {
+			gid2shardsIndex[v] = append(gid2shardsIndex[v], k)
+		} else {
+			gid2shardsIndex[v] = []int{k}
+		}
+	}
+	ascPairs := sortMap(gid2shardsIndex, false)
+	// 把没被分配shards的放到最后 优先被分配
+	if len(emptyShards.shards) > 0 {
+		ascPairs = append(ascPairs, emptyShards)
+	}
+
+	fmt.Printf("ascPairs: %v \n", ascPairs)
+
+	descIndex, ascIndex := len(ascPairs)-1, 0
+	for {
+		low := ascPairs[ascIndex]
+		if len(low.shards) >= newAvg || ascIndex == descIndex {
+			return
+		}
+		high := ascPairs[descIndex]
+
+		// 把分配的shards数量高于avg的 分配给低于avg的group
+		l := len(high.shards) - newAvg
+		if high.gid == 0 {
+			l = len(high.shards)
+		}
+		for i := 0; i < l; i++ {
+			low.shards = append(low.shards, high.shards[i])
+			newConf.Shards[high.shards[i]] = low.gid
+			if len(low.shards) == newAvg {
+				// 对于所有的0需要分配完 允许比newAvg大1
+				if high.gid == 0 && ascIndex == descIndex-1 {
+					continue
+				}
+				ascIndex ++
+				if ascIndex == descIndex {
+					return
+				}
+				low = ascPairs[ascIndex]
+				if len(low.shards) >= newAvg {
+					return
+				}
+			}
+		}
+
+		descIndex --
+	}
+}
+
+func (sm *ShardMaster) nextNewConfig() *Config {
+	oldConf := sm.configs[len(sm.configs)-1]
+	newConf := &Config{}
+	newConf.Num = len(sm.configs)
+	newConf.Groups = make(map[int][]string)
+	newConf.Shards = [NShards]int{}
+	for k, v := range oldConf.Groups {
+		newConf.Groups[k] = v
+	}
+	for k, v := range oldConf.Shards {
+		newConf.Shards[k] = v
+	}
+	return newConf
 }
 
 //
@@ -74,7 +337,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
-	// Your code here.
+	sm.exitCh = make(chan struct{})
+	sm.reqIdCache = make(map[int64]int64)
+	sm.logIndex2ReqId = make(map[int]int64)
+	sm.pendingReq = make(map[int]chan NotifyApplyMsg)
+
+	go sm.run()
 
 	return sm
 }

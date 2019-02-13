@@ -58,34 +58,31 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
-	prefer := ck.lastSuccessServer
+	offset := ck.lastSuccessServer
 	reqId := ck.nextReqId
 	ck.nextReqId ++
 	ck.mu.Unlock()
 
 	defer func() {
 		ck.mu.Lock()
-		ck.lastSuccessServer = prefer
+		ck.lastSuccessServer = offset
 		ck.mu.Unlock()
 	}()
 
-	offset := 0
 	args := GetArgs{
 		Key:      key,
 		ReqId:    reqId,
 		ClientId: ck.clientId,
 	}
 	for {
-		id := (prefer + offset) % len(ck.servers)
+		id := offset % len(ck.servers)
 		var reply GetReply
 		if ck.servers[id].Call("KVServer.Get", &args, &reply) {
 			// Get returns "" if the key does not exist.
 			if reply.Err == ErrNoKey {
-				prefer = id
 				return ""
 			}
 			if !reply.WrongLeader && (len(reply.Err) == 0 || reply.Err == OK) {
-				prefer = id
 				return reply.Value
 			}
 			DPrintf("--- Clerk.Get rpc return false: svcId=%d", id)
@@ -108,18 +105,17 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
-	prefer := ck.lastSuccessServer
+	offset := ck.lastSuccessServer
 	reqId := ck.nextReqId
 	ck.nextReqId ++
 	ck.mu.Unlock()
 	defer func() {
 		ck.mu.Lock()
-		ck.lastSuccessServer = prefer
+		ck.lastSuccessServer = offset
 		ck.mu.Unlock()
 	}()
 
 	// keeps trying forever in the face of all other errors.
-	offset := 0
 	args := PutAppendArgs{
 		Key:      key,
 		Value:    value,
@@ -131,12 +127,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	DPrintf("--- Clerk.PutAppend args=%v", render.Render(args))
 
 	for {
-		id := (prefer + offset) % len(ck.servers)
+		id := offset % len(ck.servers)
 		var reply PutAppendReply
 		if ck.servers[id].Call("KVServer.PutAppend", &args, &reply) {
 			DPrintf("--- Clerk.PutAppend rpc return: svcId=%d, args=%v, reply=%v", id, render.Render(args), render.Render(reply))
 			if !reply.WrongLeader && (len(reply.Err) == 0 || reply.Err == OK) {
-				prefer = id
 				return
 			}
 		}

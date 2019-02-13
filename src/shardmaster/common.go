@@ -1,5 +1,7 @@
 package shardmaster
 
+import "log"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -28,14 +30,33 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-const (
-	OK = "OK"
-)
-
 type Err string
 
+const (
+	OK             = "OK"
+	ErrTimeout     = "ErrTimeout"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrCrash       = "ErrCrash"
+
+	OpTypeJoin  = "Join"
+	OpTypeLeave = "Leave"
+	OpTypeMove  = "Move"
+	OpTypeQuery = "Query"
+
+	Debug = 1
+)
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers  map[int][]string // new GID -> servers mappings
+	ReqId    int64
+	ClientId int64
 }
 
 type JoinReply struct {
@@ -44,7 +65,9 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs     []int
+	ReqId    int64
+	ClientId int64
 }
 
 type LeaveReply struct {
@@ -53,8 +76,10 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard    int
+	GID      int
+	ReqId    int64
+	ClientId int64
 }
 
 type MoveReply struct {
@@ -63,7 +88,9 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num      int // desired config number
+	ReqId    int64
+	ClientId int64
 }
 
 type QueryReply struct {
