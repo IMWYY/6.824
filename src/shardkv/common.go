@@ -1,5 +1,10 @@
 package shardkv
 
+import (
+	"log"
+	"shardmaster"
+)
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -10,9 +15,18 @@ package shardkv
 //
 
 const (
-	OK            = "OK"
-	ErrNoKey      = "ErrNoKey"
-	ErrWrongGroup = "ErrWrongGroup"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongGroup  = "ErrWrongGroup"
+	ErrTimeout     = "ErrTimeout"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrCrash       = "ErrCrash"
+
+	OpTypeGet    = "Get"
+	OpTypePut    = "Put"
+	OpTypeAppend = "Append"
+
+	Debug = 1
 )
 
 type Err string
@@ -20,12 +34,11 @@ type Err string
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
+	ReqId    int64
+	ClientId int64
 }
 
 type PutAppendReply struct {
@@ -34,8 +47,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	Key      string
+	ReqId    int64
+	ClientId int64
 }
 
 type GetReply struct {
@@ -43,3 +57,25 @@ type GetReply struct {
 	Err         Err
 	Value       string
 }
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+//
+// which shard is a key in?
+// please use this function,
+// and please do not change it.
+//
+func key2shard(key string) int {
+	shard := 0
+	if len(key) > 0 {
+		shard = int(key[0])
+	}
+	shard %= shardmaster.NShards
+	return shard
+}
+
