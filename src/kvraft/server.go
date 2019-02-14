@@ -23,7 +23,8 @@ type Op struct {
 }
 
 type NotifyApplyMsg struct {
-	err Err
+	err   Err
+	value string
 }
 
 type KVServer struct {
@@ -49,7 +50,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			render.Render(args), render.Render(reply))
 	}()
 
-	reply.Err = kv.start(Op{
+	reply.Err, reply.Value = kv.start(Op{
 		OpType:   OpTypeGet,
 		Key:      args.Key,
 		ReqId:    args.ReqId,
@@ -60,17 +61,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.WrongLeader = true
 		return
 	}
-	if reply.Err != OK {
-		return
-	}
-
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if v, ok := kv.kvStore[args.Key]; ok {
-		reply.Value = v
-	} else {
-		reply.Err = ErrNoKey
-	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -80,7 +70,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			render.Render(args), render.Render(reply))
 	}()
 
-	reply.Err = kv.start(Op{
+	reply.Err, _ = kv.start(Op{
 		OpType:   args.Op,
 		Key:      args.Key,
 		Value:    args.Value,
@@ -94,18 +84,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-func (kv *KVServer) start(op Op) Err {
+func (kv *KVServer) start(op Op) (Err, string) {
 	logIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		DPrintf("KVServer(%d) non-leader,", kv.me)
-		return ErrWrongLeader
+		return ErrWrongLeader, ""
 	}
 
 	done := make(chan NotifyApplyMsg, 1)
 	kv.mu.Lock()
 	if _, ok := kv.pendingReq[logIndex]; ok {
 		kv.mu.Unlock()
-		return ErrWrongLeader
+		return ErrWrongLeader, ""
 	} else {
 		kv.pendingReq[logIndex] = done
 	}
@@ -117,11 +107,11 @@ func (kv *KVServer) start(op Op) Err {
 	var msg NotifyApplyMsg
 	select {
 	case msg = <-done:
-		return msg.err
+		return msg.err, msg.value
 	case <-time.After(RequestTimeOut):
-		return ErrTimeout
+		return ErrTimeout, ""
 	case <-kv.exitCh:
-		return ErrCrash
+		return ErrCrash, ""
 	}
 }
 
@@ -168,15 +158,25 @@ func (kv *KVServer) run() {
 					kv.reqIdCache[cmd.ClientId] = cmd.ReqId
 				}
 
+				// apply get message
+				notifyMsg := NotifyApplyMsg{err: OK, value: ""}
+				if cmd.OpType == OpTypeGet {
+					if v, ok := kv.kvStore[cmd.Key]; ok {
+						notifyMsg.value = v
+					} else {
+						notifyMsg.err = ErrNoKey
+					}
+				}
+
 				// 2. return rpc request
 				// to detect that it has lost leadership,
 				// 	a. by noticing that a different request has appeared at the index returned by Start(),
 				// 	b. or that Raft's term has changed
 				if v, ok := kv.pendingReq[applyMsg.Index]; ok {
 					if kv.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
-						v <- NotifyApplyMsg{err: OK}
+						v <- notifyMsg
 					} else {
-						v <- NotifyApplyMsg{err: ErrWrongLeader}
+						v <- NotifyApplyMsg{err: ErrWrongLeader, value: ""}
 					}
 					delete(kv.logIndex2ReqId, applyMsg.Index)
 					delete(kv.pendingReq, applyMsg.Index)

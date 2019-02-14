@@ -26,7 +26,8 @@ type ShardMaster struct {
 }
 
 type NotifyApplyMsg struct {
-	err Err
+	err   Err
+	value interface{}
 }
 
 type Op struct {
@@ -37,8 +38,7 @@ type Op struct {
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
-	// Your code here.
-	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeJoin, *args)
+	reply.Err, _ = sm.start(args.ClientId, args.ReqId, OpTypeJoin, *args)
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
 		return
@@ -46,8 +46,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
-	// Your code here.
-	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeLeave, *args)
+	reply.Err, _ = sm.start(args.ClientId, args.ReqId, OpTypeLeave, *args)
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
 		return
@@ -55,8 +54,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
-	// Your code here.
-	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeMove, *args)
+	reply.Err, _ = sm.start(args.ClientId, args.ReqId, OpTypeMove, *args)
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
 		return
@@ -64,23 +62,19 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
-	// Your code here.
-	reply.Err = sm.start(args.ClientId, args.ReqId, OpTypeQuery, *args)
+	err, value := sm.start(args.ClientId, args.ReqId, OpTypeQuery, *args)
+	reply.Err = err
 	if reply.Err == ErrWrongLeader {
 		reply.WrongLeader = true
 		return
 	}
-
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if args.Num == -1 || args.Num >= len(sm.configs) {
-		reply.Config = sm.configs[len(sm.configs)-1]
-	} else {
-		reply.Config = sm.configs[args.Num]
+	if reply.Err != OK {
+		return
 	}
+	reply.Config = value.(Config)
 }
 
-func (sm *ShardMaster) start(clientId, reqId int64, opType string, args interface{}) Err {
+func (sm *ShardMaster) start(clientId, reqId int64, opType string, args interface{}) (Err, interface{}) {
 	op := Op{
 		ReqId:    reqId,
 		ClientId: clientId,
@@ -90,14 +84,14 @@ func (sm *ShardMaster) start(clientId, reqId int64, opType string, args interfac
 	logIndex, _, isLeader := sm.rf.Start(op)
 	if !isLeader {
 		DPrintf("ShardMaster(%d) non-leader,", sm.me)
-		return ErrWrongLeader
+		return ErrWrongLeader, nil
 	}
 
 	done := make(chan NotifyApplyMsg, 1)
 	sm.mu.Lock()
 	if _, ok := sm.pendingReq[logIndex]; ok {
 		sm.mu.Unlock()
-		return ErrWrongLeader
+		return ErrWrongLeader, nil
 	} else {
 		sm.pendingReq[logIndex] = done
 	}
@@ -109,11 +103,11 @@ func (sm *ShardMaster) start(clientId, reqId int64, opType string, args interfac
 	var msg NotifyApplyMsg
 	select {
 	case msg = <-done:
-		return msg.err
+		return msg.err, msg.value
 	case <-time.After(RequestTimeOut):
-		return ErrTimeout
+		return ErrTimeout, nil
 	case <-sm.exitCh:
-		return ErrCrash
+		return ErrCrash, nil
 	}
 }
 
@@ -179,15 +173,24 @@ func (sm *ShardMaster) run() {
 					sm.reqIdCache[cmd.ClientId] = cmd.ReqId
 				}
 
+				var value interface{}
+				if cmd.OpType == OpTypeQuery {
+					args := cmd.Args.(QueryArgs)
+					if args.Num == -1 || args.Num >= len(sm.configs) {
+						value = sm.configs[len(sm.configs)-1]
+					} else {
+						value = sm.configs[args.Num]
+					}
+				}
 				// 2. return rpc request
 				// to detect that it has lost leadership,
 				// 	a. by noticing that a different request has appeared at the index returned by Start(),
 				// 	b. or that Raft's term has changed
 				if v, ok := sm.pendingReq[applyMsg.Index]; ok {
 					if sm.logIndex2ReqId[applyMsg.Index] == cmd.ReqId {
-						v <- NotifyApplyMsg{err: OK}
+						v <- NotifyApplyMsg{err: OK, value: value}
 					} else {
-						v <- NotifyApplyMsg{err: ErrWrongLeader}
+						v <- NotifyApplyMsg{err: ErrWrongLeader, value: value}
 					}
 					delete(sm.logIndex2ReqId, applyMsg.Index)
 					delete(sm.pendingReq, applyMsg.Index)
