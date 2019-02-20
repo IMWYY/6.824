@@ -9,22 +9,13 @@ package shardkv
 //
 
 import (
-	"crypto/rand"
 	"labrpc"
-	"math/big"
 	"shardmaster"
 	"sync"
 	"time"
 )
 
 const RetryInterval = 100 * time.Millisecond
-
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
 
 type Clerk struct {
 	sm       *shardmaster.Clerk
@@ -91,7 +82,7 @@ func (ck *Clerk) Get(key string) string {
 				if ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if ok && reply.Err == ErrWrongGroup {
 					break
 				}
 			}

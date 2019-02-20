@@ -19,6 +19,24 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 	}
 }
 
+func TestTicker(t *testing.T) {
+	//tick := time.NewTicker(time.Duration(1000 * time.Millisecond))
+	//i := 0
+	//for {
+	//	if i == 0 {
+	//		time.Sleep(3 * time.Second)
+	//	}
+	//	fmt.Println("before", time.Now().UnixNano()/1e6)
+	//	<-tick.C
+	//	fmt.Println("after ", time.Now().UnixNano()/1e6)
+	//	i ++
+	//	if i == 5 {
+	//		break
+	//	}
+	//}
+	fmt.Println(key2shard("0"))
+}
+
 //
 // test static 2-way sharding, without shard movement.
 //

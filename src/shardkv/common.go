@@ -1,7 +1,9 @@
 package shardkv
 
 import (
+	"crypto/rand"
 	"log"
+	"math/big"
 	"shardmaster"
 )
 
@@ -21,10 +23,14 @@ const (
 	ErrTimeout     = "ErrTimeout"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrCrash       = "ErrCrash"
+	ErrWaitNewData = "ErrWaitingNewData"
+	ErrUnequalNum  = "ErrUnequalNum"
 
-	OpTypeGet    = "Get"
-	OpTypePut    = "Put"
-	OpTypeAppend = "Append"
+	OpTypeGet         = "Get"
+	OpTypePut         = "Put"
+	OpTypeAppend      = "Append"
+	OpTypeConfUpdate  = "ConfUpdate"
+	OpTypeMigrateData = "MigrateData"
 
 	Debug = 1
 )
@@ -58,6 +64,19 @@ type GetReply struct {
 	Value       string
 }
 
+type MigrateDataArgs struct {
+	ClientId int64
+	ReqId    int64
+	ConfNum  int
+	Shards   []int
+	Data     map[string]string
+}
+
+type MigrateDataReply struct {
+	WrongLeader bool
+	Err         Err
+}
+
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		log.Printf(format, a...)
@@ -79,3 +98,9 @@ func key2shard(key string) int {
 	return shard
 }
 
+func nrand() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
+}
