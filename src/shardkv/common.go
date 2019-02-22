@@ -32,7 +32,7 @@ const (
 	OpTypeConfUpdate  = "ConfUpdate"
 	OpTypeMigrateData = "MigrateData"
 
-	Debug = 0
+	Debug = 1
 )
 
 type Err string

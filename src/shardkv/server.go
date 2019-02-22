@@ -19,18 +19,24 @@ import (
 // 3. 对于ErrWaitNewData和ErrWrongGroup 这种错误不能更新server端client的reqId状态 因为同一个reqId的请求还会过来
 // 4. 刷新conf和删除数据只能从leader开始，否则会有raft之间状态不一致
 // 5. 迁移数据也需要将reqCache迁移 保证同样的请求不会在不同的group重复执行 并且在更新ReqCache的时候需要与本地的ReqCache比较 选取大的那个
+// 6. 当向外发送迁移的数据时，如果此时crash，在restart的时候需要继续将之前的数据send出去
 
 const RequestTimeOut = 1 * time.Second
 
 type Op struct {
+	// Common
 	OpType   string
 	ClientId int64
 	ReqId    int64
-	Key      string
-	Value    string
 
+	// PutAppend & Get
+	Key   string
+	Value string
+
+	// Conf Update
 	Conf shardmaster.Config
 
+	// Migrate Data
 	ConfNum  int
 	ToGid    int
 	Data     map[string]string
@@ -192,8 +198,7 @@ func (kv *ShardKV) applyMessage() {
 					panic("god decode error")
 				}
 
-				// todo need to replay logs
-				// todo 如果有还没有迁移完的数据 继续迁移
+				// todo Challenge1 如果有还没有迁移完的数据 继续迁移
 				// for num := range kv.waitOutShards {
 				//	if num >= kv.conf.Num {
 				//		go kv.startMigrateData(num)
@@ -306,6 +311,8 @@ func (kv *ShardKV) applyMessage() {
 									for _, s := range shards {
 										if sh == s {
 											args.Data[k] = v
+											// 这里就可以将要转移的数据从本地删除
+											delete(kv.kvStore, k)
 										}
 									}
 								}
@@ -440,15 +447,6 @@ func (kv *ShardKV) sendMigrateData(servers []string, args *MigrateDataArgs) {
 	}
 
 	DPrintf("ShardKV(%d-%d)-Start sendMigrateData args=%v", kv.gid, kv.me, args)
-
-	defer func() {
-		// todo 迁移完成后删除本地数据
-		//kv.mu.Lock()
-		//for k := range args.Data {
-		//	delete(kv.kvStore, k)
-		//}
-		//kv.mu.Unlock()
-	}()
 
 	for {
 		for si := 0; si < len(servers); si++ {
