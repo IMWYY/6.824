@@ -19,7 +19,6 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 	"github.com/luci/go-render/render"
 	"labgob"
 	"labrpc"
@@ -146,7 +145,6 @@ func (rf *Raft) readSnapshot(data []byte) {
 			UseSnapshot: true,
 			Snapshot:    data,
 		}
-		fmt.Printf("Raft(%d) readSnapshot rf.logs=%v \n", rf.me, rf.log)
 	}()
 }
 

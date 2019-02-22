@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// TODO 遇到的问题和解决方法
+// 1. 对于一个client发送了请求到leader，但是在处理过程中leader变成follower的情况，有两种判断方法：
+//   a. 在返回rpc之前检测term是否发生变化
+//   b. 在applyMessage的时候，检查同一个logIndex是否出现了不同的请求。
+//  这里用了第二种方法，所以利用一个logIndex2ReqId的映射
+// 2. 为了应用请求出重，这里在server保存了clientId->reqId的映射，只处理reqId递增的请求
+
 const (
 	RequestTimeOut = 1 * time.Second
 )
@@ -109,6 +116,9 @@ func (kv *KVServer) start(op Op) (Err, string) {
 	case msg = <-done:
 		return msg.err, msg.value
 	case <-time.After(RequestTimeOut):
+		kv.mu.Lock()
+		delete(kv.pendingReq, logIndex)
+		kv.mu.Unlock()
 		return ErrTimeout, ""
 	case <-kv.exitCh:
 		return ErrCrash, ""
@@ -144,7 +154,7 @@ func (kv *KVServer) run() {
 			} else {
 				cmd := applyMsg.Command.(Op)
 
-				// 1. apply log message and deduplicate
+				// 1. deduplicate and apply log message
 				if kv.reqIdCache[cmd.ClientId] < cmd.ReqId {
 					if cmd.OpType == OpTypePut {
 						kv.kvStore[cmd.Key] = cmd.Value

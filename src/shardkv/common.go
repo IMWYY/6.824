@@ -32,7 +32,7 @@ const (
 	OpTypeConfUpdate  = "ConfUpdate"
 	OpTypeMigrateData = "MigrateData"
 
-	Debug = 1
+	Debug = 0
 )
 
 type Err string
@@ -71,6 +71,12 @@ type MigrateDataArgs struct {
 	ToGid    int
 	Shards   []int
 	Data     map[string]string
+	ReqCache map[int64]int64
+}
+
+type MigrateData struct {
+	Servers  []string
+	DataArgs MigrateDataArgs
 }
 
 type MigrateDataReply struct {

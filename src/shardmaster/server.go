@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// TODO 遇到的问题和解决方法
+// 1. 在重新re-balance的时候，需要将之前为分配的gid为0的（还没有被分配过）提到最高优先 最先分配，这样才能最小化移动范围
+
 const RequestTimeOut = 1 * time.Second
 
 type ShardMaster struct {
