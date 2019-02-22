@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// TODO 遇到的问题
+// 1. 数据迁移不是幂等的，当实例重启后 依据snapshot的conf进行数据迁移，可能会
+//  导致之前已经迁移过的数据又迁移了一边, 把其他实例上可能已经被更新过的数据给覆盖了
+// 2
+
+
 const RequestTimeOut = 1 * time.Second
 
 type Op struct {
@@ -22,6 +28,7 @@ type Op struct {
 	Conf shardmaster.Config
 
 	ConfNum int
+	ToGid   int
 	Data    map[string]string
 	Shards  []int
 }
@@ -53,7 +60,6 @@ type ShardKV struct {
 	conf           shardmaster.Config
 	nextReqId      int64
 	ownShards      map[int]struct{}
-	waitOutShards  map[int]int // shards need to move out-> gid   todo 可能需要保存一个数组 对于出现后一次reConf覆盖前一次还没有完成的情况
 	waitInShards   map[int]int // shards need to come in -> gid
 }
 
@@ -105,6 +111,7 @@ func (kv *ShardKV) MigrateData(args *MigrateDataArgs, reply *MigrateDataReply) {
 		ClientId: args.ClientId,
 		ReqId:    args.ReqId,
 		ConfNum:  args.ConfNum,
+		ToGid:    args.ToGid,
 		Data:     args.Data,
 		Shards:   args.Shards,
 	})
@@ -161,6 +168,8 @@ func (kv *ShardKV) applyMessage() {
 				kv.kvStore = make(map[string]string)
 				kv.reqIdCache = make(map[int64]int64)
 				kv.logIndex2ReqId = make(map[int]int64)
+				kv.ownShards = make(map[int]struct{})
+				kv.waitInShards = make(map[int]int)
 				kv.conf = shardmaster.Config{}
 				if dec.Decode(&includedIndex) != nil ||
 					dec.Decode(&includedTerm) != nil ||
@@ -170,13 +179,12 @@ func (kv *ShardKV) applyMessage() {
 					dec.Decode(&kv.conf) != nil ||
 					dec.Decode(&kv.nextReqId) != nil ||
 					dec.Decode(&kv.ownShards) != nil ||
-					dec.Decode(&kv.waitOutShards) != nil ||
 					dec.Decode(&kv.waitInShards) != nil {
 					panic("god decode error")
 				}
 				// todo need to replay logs
 
-				DPrintf("ShardKV(%d-%d) applyMessage includedIndex(%d) includedTerm(%d) restore snapshot", kv.gid, kv.me, includedIndex, includedTerm)
+				DPrintf("ShardKV(%d-%d) applyMessage includedIndex(%d) includedTerm(%d) restore snapshot kvStore=%v", kv.gid, kv.me, includedIndex, includedTerm, kv.kvStore)
 				// todo Should the server update the client state if it returns ErrWrongGroup when executing a Get/Put request?
 			} else {
 				cmd := applyMsg.Command.(Op)
@@ -254,7 +262,6 @@ func (kv *ShardKV) applyMessage() {
 							if kv.conf.Shards[i] != cmd.Conf.Shards[i] {
 								// 这是要转移出去的分片 并且如果之后该分片的gid为0 表明废弃使用 不用转移数据 todo 何时删除数据
 								if kv.conf.Shards[i] == kv.gid {
-									kv.waitOutShards[i] = cmd.Conf.Shards[i]
 									delete(kv.ownShards, i)
 									outGid2Shards[cmd.Conf.Shards[i]] = append(outGid2Shards[cmd.Conf.Shards[i]], i)
 								}
@@ -269,8 +276,25 @@ func (kv *ShardKV) applyMessage() {
 							}
 						}
 						if _, isLeader := kv.rf.GetState(); isLeader {
-							for gi, sh := range outGid2Shards {
-								go kv.sendMigrateData(gi, sh)
+							for gi, shards := range outGid2Shards {
+								args := &MigrateDataArgs{
+									ClientId: int64(kv.gid),
+									ReqId:    kv.nextReqId,
+									ConfNum:  cmd.Conf.Num,
+									ToGid:    gi,
+									Shards:   shards,
+									Data:     map[string]string{},
+								}
+								for k, v := range kv.kvStore {
+									sh := key2shard(k)
+									for _, s := range shards {
+										if sh == s {
+											args.Data[k] = v
+										}
+									}
+								}
+								kv.nextReqId ++
+								go kv.sendMigrateData(cmd.Conf.Groups[gi], args)
 							}
 						} else {
 							DPrintf("ShardKV(%d-%d) applyMessage clientId(%v) reqId(%v) logIndex(%d) ConfUpdateOp NonLeader, no need to migrateData",
@@ -278,12 +302,12 @@ func (kv *ShardKV) applyMessage() {
 						}
 
 						DPrintf("ShardKV(%d-%d) applyMessage clientId(%v) reqId(%v) logIndex(%d) ConfUpdateOp, "+
-							"kvConf=%v, confArg=%v, outGid2Shards=%v, waitInShards=%v, waitOutShards=%v, ownShards=%v",
+							"kvConf=%v, confArg=%v, outGid2Shards=%v, waitInShards=%v, ownShards=%v",
 							kv.gid, kv.me, cmd.ClientId, cmd.ReqId, applyMsg.Index, kv.conf, cmd.Conf, outGid2Shards,
-							kv.waitInShards, kv.waitOutShards, kv.ownShards)
+							kv.waitInShards, kv.ownShards)
 
-						// update conf
-						kv.conf = kv.makeCopy(cmd.Conf)
+						// remember update conf
+						kv.conf = cmd.Conf.Copy()
 
 					} else {
 						DPrintf("ShardKV(%d-%d) applyMessage clientId(%v) reqId(%v) logIndex(%d) ConfUpdateOp useless conf=%v",
@@ -298,7 +322,9 @@ func (kv *ShardKV) applyMessage() {
 					// todo == 还是 <=
 					if cmd.ConfNum <= kv.conf.Num {
 						for _, v := range cmd.Shards {
+							//if nu, ex := kv.waitInShards[v]; ex && nu == cmd.ConfNum {
 							delete(kv.waitInShards, v)
+							//}
 							kv.ownShards[v] = struct{}{}
 						}
 						for k, v := range cmd.Data {
@@ -336,13 +362,12 @@ func (kv *ShardKV) applyMessage() {
 					enc.Encode(kv.conf)
 					enc.Encode(kv.nextReqId)
 					enc.Encode(kv.ownShards)
-					enc.Encode(kv.waitOutShards)
 					enc.Encode(kv.waitInShards)
 					// 这里一定要用goroutine 否则会产生死锁
 					// 死锁条件：applyMsg生产时会先获取锁, 消费时又去获取锁，导致chan不能被消费，从而导致生产被阻塞
 					go kv.rf.StartSnapshot(b.Bytes(), applyMsg.Index)
-					DPrintf("ShardKV(%d-%d) applyMessage clientId(%v) reqId(%v) logIndex(%d) reach maxRaftState, need snapshot",
-						kv.gid, kv.me, cmd.ClientId, cmd.ReqId, applyMsg.Index)
+					DPrintf("ShardKV(%d-%d) applyMessage clientId(%v) reqId(%v) logIndex(%d) reach maxRaftState, need snapshot, kvStore=%v",
+						kv.gid, kv.me, cmd.ClientId, cmd.ReqId, applyMsg.Index, kv.kvStore)
 				}
 
 				DPrintf("ShardKV(%d-%d) applyMessage finish clientId(%v) reqId(%v) logIndex(%d) applyMsg=%v",
@@ -355,51 +380,25 @@ func (kv *ShardKV) applyMessage() {
 	}
 }
 
-// todo 两个问题
-// todo 1. 当需要moveout的数据还在waitIn的时候 需要等待
-// todo 2. 不同confupdate 后面一个会把前面一个的waitIn和waitOut覆盖
-func (kv *ShardKV) sendMigrateData(gid int, shards []int) {
-	kv.mu.Lock()
-	servers := kv.conf.Groups[gid]
+func (kv *ShardKV) sendMigrateData(servers []string, args *MigrateDataArgs) {
 	if len(servers) == 0 {
 		panic("invalid GID")
 	}
 
-	args := MigrateDataArgs{
-		ClientId: int64(kv.gid),
-		ReqId:    kv.nextReqId,
-		ConfNum:  kv.conf.Num,
-		Shards:   shards,
-		Data:     map[string]string{},
-	}
-	for k, v := range kv.kvStore {
-		sh := key2shard(k)
-		for _, s := range shards {
-			if sh == s {
-				args.Data[k] = v
-			}
-		}
-	}
-	kv.nextReqId ++
-	kv.mu.Unlock()
-
 	defer func() {
 		// todo 迁移完成后删除本地数据
-		kv.mu.Lock()
+		//kv.mu.Lock()
 		//for k := range args.Data {
 		//	delete(kv.kvStore, k)
 		//}
-		for _, v := range shards {
-			delete(kv.waitOutShards, v)
-		}
-		kv.mu.Unlock()
+		//kv.mu.Unlock()
 	}()
 
 	for {
 		for si := 0; si < len(servers); si++ {
 			srv := kv.make_end(servers[si])
 			var reply MigrateDataReply
-			ok := srv.Call("ShardKV.MigrateData", &args, &reply)
+			ok := srv.Call("ShardKV.MigrateData", args, &reply)
 			if ok && !reply.WrongLeader && reply.Err == OK {
 				DPrintf("ShardKV(%d-%d) sendMigrateData success args=%v, reply=%v", kv.gid, kv.me, args, reply)
 				return
@@ -409,56 +408,39 @@ func (kv *ShardKV) sendMigrateData(gid int, shards []int) {
 	}
 }
 
-func (kv *ShardKV) pollConf() {
-	pullTimer := time.NewTicker(time.Duration(60 * time.Millisecond))
-	//pollTimer := time.NewTimer(time.Duration(60 * time.Millisecond))
+func (kv *ShardKV) pullConf() {
+	pullTimer := time.NewTicker(time.Duration(50 * time.Millisecond))
 	for {
 		kv.mu.Lock()
-		_, isLeader := kv.rf.GetState()
+		// 这里的条件保证一次只有一个config在进行
+		if _, isLeader := kv.rf.GetState(); !isLeader || len(kv.waitInShards) != 0 {
+			kv.mu.Unlock()
+			continue
+		}
 		nextConfNum := kv.conf.Num + 1
 		kv.mu.Unlock()
 
-		if isLeader {
-			newConf := kv.mck.Query(nextConfNum)
-			if newConf.Num == nextConfNum {
+		newConf := kv.mck.Query(nextConfNum)
+		if newConf.Num == nextConfNum {
+			kv.mu.Lock()
+			reqId := kv.nextReqId
+			kv.nextReqId ++
+			kv.mu.Unlock()
 
-				kv.mu.Lock()
-				reqId := kv.nextReqId
-				kv.nextReqId ++
-				kv.mu.Unlock()
-
-				// todo update conf
-				op := Op{
-					OpType:   OpTypeConfUpdate,
-					ClientId: -1, // todo updateConf的clientId
-					ReqId:    reqId,
-					Conf:     kv.makeCopy(newConf),
-				}
-				DPrintf("ShardKV(%d-%d) poll newConfOp=%v ", kv.gid, kv.me, op)
-				if err, _ := kv.start(op); err == OK {
-					DPrintf("ShardKV(%d-%d) update conf success, op=%v ", kv.gid, kv.me, op)
-				}
+			op := Op{
+				OpType:   OpTypeConfUpdate,
+				ClientId: -1,
+				ReqId:    reqId,
+				Conf:     newConf.Copy(),
+			}
+			DPrintf("ShardKV(%d-%d) poll newConfOp=%v ", kv.gid, kv.me, op)
+			if err, _ := kv.start(op); err == OK {
+				DPrintf("ShardKV(%d-%d) update conf success, op=%v ", kv.gid, kv.me, op)
 			}
 		}
 
 		<-pullTimer.C
 	}
-}
-
-func (kv *ShardKV) makeCopy(source shardmaster.Config) shardmaster.Config {
-	res := shardmaster.Config{
-		Num:    source.Num,
-		Groups: make(map[int][]string),
-		Shards: [shardmaster.NShards]int{},
-	}
-
-	for k, v := range source.Groups {
-		res.Groups[k] = v
-	}
-	for k, v := range source.Shards {
-		res.Shards[k] = v
-	}
-	return res
 }
 
 //
@@ -516,10 +498,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.masters = masters
-
-	// Your initialization code here.
 	kv.mck = shardmaster.MakeClerk(kv.masters)
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -531,22 +510,22 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.pendingReq = make(map[int]chan NotifyApplyMsg)
 	kv.nextReqId = nrand() % 10000000001
 	kv.ownShards = make(map[int]struct{})
-	kv.waitOutShards = make(map[int]int)
 	kv.waitInShards = make(map[int]int)
 
-	// todo init conf
-	//kv.conf = shardmaster.Config{}
-	kv.conf = kv.mck.Query(-1)
-	for i, v := range kv.conf.Shards {
-		if v == kv.gid {
-			kv.ownShards[i] = struct{}{}
-		}
-	}
-
-	DPrintf("ShardKV(%d-%d) init conf=%v, ownShards=%v ", kv.gid, kv.me, kv.conf, kv.ownShards)
+	// todo conf初始化为空还是直接获取最新的
+	kv.conf = shardmaster.Config{}
+	//kv.conf = kv.mck.Query(-1)
+	//for i, v := range kv.conf.Shards {
+	//	if v == kv.gid {
+	//		kv.ownShards[i] = struct{}{}
+	//	}
+	//}
+	//DPrintf("ShardKV(%d-%d) init conf=%v, ownShards=%v ", kv.gid, kv.me, kv.conf, kv.ownShards)
 
 	go kv.applyMessage()
-	go kv.pollConf()
+	go kv.pullConf()
+
+	DPrintf("ShardKV(%d-%d) start", kv.gid, kv.me)
 
 	return kv
 }

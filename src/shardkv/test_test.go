@@ -35,6 +35,17 @@ func TestTicker(t *testing.T) {
 	//	}
 	//}
 	fmt.Println(key2shard("0"))
+
+	m := make(map[int]chan struct{})
+	go func() {
+		time.Sleep(time.Second)
+		m[1] <- struct{}{}
+	}()
+	fmt.Println("before")
+	<-m[1]
+	fmt.Println("after")
+
+
 }
 
 //

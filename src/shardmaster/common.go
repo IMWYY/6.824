@@ -1,6 +1,8 @@
 package shardmaster
 
-import "log"
+import (
+	"log"
+)
 
 //
 // Master shard server: assigns shards to replication groups.
@@ -28,6 +30,23 @@ type Config struct {
 	Num    int              // config number
 	Shards [NShards]int     // shard -> gid
 	Groups map[int][]string // gid -> servers[]
+}
+
+func (c Config) Copy() Config {
+	res := Config{
+		Num:    c.Num,
+		Groups: make(map[int][]string),
+		Shards: [NShards]int{},
+	}
+
+	for k, v := range c.Groups {
+		res.Groups[k] = v
+	}
+	for k, v := range c.Shards {
+		res.Shards[k] = v
+	}
+	return res
+
 }
 
 type Err string

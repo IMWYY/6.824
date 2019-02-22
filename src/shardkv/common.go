@@ -68,6 +68,7 @@ type MigrateDataArgs struct {
 	ClientId int64
 	ReqId    int64
 	ConfNum  int
+	ToGid    int
 	Shards   []int
 	Data     map[string]string
 }
